@@ -99,9 +99,11 @@ def extract_events(html, url):
                     continue
 
                 row = {
-                    "source_url": url,
-                    "month": current_month  # ✅ ADD THIS
+                    "source_url": url
                 }
+                
+                if current_month:
+                    row["month"] = current_month
 
                 for i in range(min(len(headers), len(cols))):
                     row[headers[i]] = cols[i]
