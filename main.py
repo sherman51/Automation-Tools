@@ -4,6 +4,8 @@ import gspread
 import json
 import os
 import time
+import subprocess
+import sys
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
@@ -28,6 +30,35 @@ SPREADSHEET_ID = "1ZGf468X845aw8pJ4hmdyYHsV7JrrHhZsCxq4mXLrRdg"
 
 ARIBA_URL = "https://service.ariba.com/Sourcing.aw/advancesearch"
 SESSION_FILE = "ariba_state.json"
+
+
+# ---------------- PLAYWRIGHT SAFETY BOOTSTRAP ---------------- #
+
+def ensure_playwright_browsers():
+    """
+    Auto-fix missing Chromium in CI / fresh environments.
+    Prevents: Executable doesn't exist error.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            p.chromium.launch(headless=True)
+
+    except Exception:
+        print("⚠️ Playwright browser missing. Installing Chromium...")
+
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                check=True
+            )
+            print("✅ Chromium installed successfully")
+
+        except Exception as e:
+            print(f"❌ Failed to install Playwright browsers: {e}")
+            raise
+
 
 # ---------------- GOOGLE AUTH ---------------- #
 
@@ -174,7 +205,11 @@ def search_ariba(keyword):
     results = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+
         context = browser.new_context(storage_state=SESSION_FILE)
         page = context.new_page()
 
@@ -212,19 +247,19 @@ def search_ariba(keyword):
     return results
 
 
-# ---------------- BUILD TENDER ALERTS ---------------- #
-
 def build_tender_alerts(rfp_list):
     all_results = []
 
     for rfp in rfp_list:
         print(f"Searching Ariba: {rfp}")
 
-        results = search_ariba(rfp)
+        try:
+            results = search_ariba(rfp)
+            print(f"Found {len(results)} results")
+            all_results.extend(results)
 
-        print(f"Found {len(results)} results for {rfp}")
-
-        all_results.extend(results)
+        except Exception as e:
+            print(f"Error for {rfp}: {e}")
 
         time.sleep(1.5)
 
@@ -238,7 +273,7 @@ def write_tender_alerts(spreadsheet, data):
     sheet.clear()
 
     if not data:
-        print("⚠️ Tender Alerts empty")
+        print("⚠️ No Tender Alerts found")
         return
 
     headers = list(data[0].keys())
@@ -250,6 +285,8 @@ def write_tender_alerts(spreadsheet, data):
 # ---------------- MAIN ---------------- #
 
 def main():
+    ensure_playwright_browsers()
+
     spreadsheet = connect_spreadsheet()
 
     # STEP 1: SCRAPE ALPS
