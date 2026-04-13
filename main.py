@@ -31,6 +31,29 @@ SPREADSHEET_ID = "1ZGf468X845aw8pJ4hmdyYHsV7JrrHhZsCxq4mXLrRdg"
 ARIBA_URL = "https://service.ariba.com/Sourcing.aw/advancesearch"
 SESSION_FILE = "ariba_state.json"
 
+# ---------------- PLAYWRIGHT BOOTSTRAP (CRITICAL FIX) ---------------- #
+
+def ensure_playwright_ready():
+    """
+    Fixes CI crash: missing Chromium executable
+    Runs ONLY ONCE at startup
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            p.chromium.launch(headless=True)
+
+    except Exception:
+        print("⚠️ Installing Playwright Chromium (first run only)...")
+
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True
+        )
+
+        print("✅ Chromium installed successfully")
+
 
 # ---------------- GOOGLE AUTH ---------------- #
 
@@ -152,7 +175,7 @@ def get_rfp_numbers(spreadsheet):
     return list(set(rfps))
 
 
-# ---------------- ARIBA LOGIN ---------------- #
+# ---------------- ARIBA SESSION ---------------- #
 
 def init_ariba_session():
     with sync_playwright() as p:
@@ -162,7 +185,7 @@ def init_ariba_session():
 
         page.goto("https://service.ariba.com/Sourcing.aw/")
 
-        print("👉 Login manually (SSO/MFA)...")
+        print("👉 Please login manually (SSO/MFA)...")
         page.wait_for_timeout(180000)
 
         context.storage_state(path=SESSION_FILE)
@@ -171,12 +194,9 @@ def init_ariba_session():
         browser.close()
 
 
-def ensure_session_exists():
-    """
-    Prevents crash when ariba_state.json is missing
-    """
+def ensure_session():
     if not os.path.exists(SESSION_FILE):
-        print("⚠️ No Ariba session found. Starting login flow...")
+        print("⚠️ Missing Ariba session → launching login flow")
         init_ariba_session()
 
 
@@ -185,7 +205,7 @@ def ensure_session_exists():
 def search_ariba(keyword):
     results = []
 
-    ensure_session_exists()
+    ensure_session()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -197,16 +217,21 @@ def search_ariba(keyword):
         page = context.new_page()
 
         page.goto(ARIBA_URL)
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(4000)
 
-        page.fill("input[type='search']", keyword)
-        page.keyboard.press("Enter")
+        try:
+            page.fill("input[type='search']", keyword)
+            page.keyboard.press("Enter")
+        except:
+            print(f"⚠️ Search input not found for {keyword}")
+            browser.close()
+            return []
 
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(6000)
 
         items = page.query_selector_all(".search-result-item")
 
-        print(f"DEBUG: {keyword} -> {len(items)} results")
+        print(f"DEBUG: {keyword} → {len(items)} results")
 
         for item in items:
             try:
@@ -234,9 +259,9 @@ def build_tender_alerts(rfp_list):
         print(f"Searching Ariba: {rfp}")
 
         try:
-            results = search_ariba(rfp)
-            print(f"Found {len(results)} results")
-            all_results.extend(results)
+            res = search_ariba(rfp)
+            print(f"Found {len(res)} results")
+            all_results.extend(res)
 
         except Exception as e:
             print(f"Error for {rfp}: {e}")
@@ -265,6 +290,8 @@ def write_tender_alerts(spreadsheet, data):
 # ---------------- MAIN ---------------- #
 
 def main():
+    ensure_playwright_ready()
+
     spreadsheet = connect_spreadsheet()
 
     # STEP 1: SCRAPE ALPS
@@ -284,7 +311,6 @@ def main():
     print(f"Found RFPs: {len(rfp_list)}")
 
     rfp_list = rfp_list[:30]
-
     print("RFP SAMPLE:", rfp_list[:5])
 
     # STEP 3: ARIBA SEARCH
