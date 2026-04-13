@@ -1,21 +1,26 @@
 from playwright.sync_api import sync_playwright
 
 ARIBA_URL = "https://service.ariba.com/Sourcing.aw/"
-SESSION_FILE = "ariba_state.json"
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=False)
-    context = browser.new_context()
-    page = context.new_page()
+def main():
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
 
-    page.goto(ARIBA_URL)
+        context = browser.launch_persistent_context(
+            user_data_dir="ariba_profile",
+            headless=True
+        )
 
-    print("👉 Please login in the browser window")
+        page = context.new_page()
+        page.goto(ARIBA_URL)
 
-    # wait long enough for login
-    page.wait_for_timeout(180000)
+        print("Waiting for login session...")
 
-    context.storage_state(path=SESSION_FILE)
+        # give time in case session already exists via cookies/redirect
+        page.wait_for_timeout(60000)
 
-    print("✅ Saved session")
-    browser.close()
+        context.close()
+        browser.close()
+
+if __name__ == "__main__":
+    main()
