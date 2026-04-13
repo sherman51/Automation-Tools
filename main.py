@@ -7,10 +7,10 @@ from google.oauth2.service_account import Credentials
 
 # ---------------- CONFIG ---------------- #
 
-URLS = [
-    "https://www.alpshealthcare.com.sg/strategic-procurement/national-sourcing-events/",
-    "https://www.alpshealthcare.com.sg/strategic-procurement/pharmaceutical-sourcing-events/",
-]
+URL_SHEET_MAP = {
+    "https://www.alpshealthcare.com.sg/strategic-procurement/national-sourcing-events/": "National Sourcing Events",
+    "https://www.alpshealthcare.com.sg/strategic-procurement/pharmaceutical-sourcing-events/": "Pharmaceutical Sourcing Events",
+}
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -21,6 +21,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
+
+SPREADSHEET_ID = "1ZGf468X845aw8pJ4hmdyYHsV7JrrHhZsCxq4mXLrRdg"
 
 # ---------------- GOOGLE AUTH ---------------- #
 
@@ -55,9 +57,7 @@ def extract_events(html, url):
     soup = BeautifulSoup(html, "html.parser")
     results = []
 
-    # -------------------------------
     # 1. Try table-based extraction
-    # -------------------------------
     tables = soup.find_all("table")
 
     for table in tables:
@@ -75,22 +75,19 @@ def extract_events(html, url):
                 for i in range(len(headers)):
                     row[headers[i]] = cols[i]
             else:
-                # fallback generic columns
                 for i, col in enumerate(cols):
                     row[f"column_{i+1}"] = col
 
             results.append(row)
 
-    # -------------------------------
-    # 2. Fallback: extract list/card text
-    # -------------------------------
+    # 2. Fallback: list items
     if not results:
         items = soup.find_all("li")
 
         for item in items:
             text = item.get_text(" ", strip=True)
 
-            if len(text) > 20:  # avoid junk
+            if len(text) > 20:
                 results.append({
                     "source_url": url,
                     "content": text
@@ -100,12 +97,22 @@ def extract_events(html, url):
 
 # ---------------- GOOGLE SHEETS ---------------- #
 
-def connect_sheet():
+def connect_spreadsheet():
     creds = get_google_creds()
     client = gspread.authorize(creds)
+    return client.open_by_key(SPREADSHEET_ID)
 
-    sheet = client.open_by_key("1ZGf468X845aw8pJ4hmdyYHsV7JrrHhZsCxq4mXLrRdg").sheet1
-    return sheet
+
+def get_or_create_worksheet(spreadsheet, sheet_name):
+    try:
+        worksheet = spreadsheet.worksheet(sheet_name)
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(
+            title=sheet_name,
+            rows="1000",
+            cols="20"
+        )
+    return worksheet
 
 
 def write_to_sheet(sheet, data):
@@ -116,30 +123,33 @@ def write_to_sheet(sheet, data):
         return
 
     headers = list(data[0].keys())
+    rows = [headers] + [
+        [row.get(h, "") for h in headers]
+        for row in data
+    ]
 
-    sheet.append_row(headers)
-
-    for row in data:
-        sheet.append_row([row.get(h, "") for h in headers])
+    sheet.update(rows)
 
 # ---------------- MAIN ---------------- #
 
 def main():
-    all_data = []
+    spreadsheet = connect_spreadsheet()
 
-    for url in URLS:
+    for url, sheet_name in URL_SHEET_MAP.items():
         print(f"Scraping: {url}")
+
         html = fetch(url)
+        data = []
 
         if html:
-            all_data.extend(extract_events(html, url))
+            data = extract_events(html, url)
 
-    print(f"Total rows found: {len(all_data)}")
+        print(f"{sheet_name}: {len(data)} rows")
 
-    sheet = connect_sheet()
-    write_to_sheet(sheet, all_data)
+        worksheet = get_or_create_worksheet(spreadsheet, sheet_name)
+        write_to_sheet(worksheet, data)
 
-    print("✅ Google Sheet updated successfully")
+    print("✅ Google Sheets updated successfully")
 
 
 if __name__ == "__main__":
