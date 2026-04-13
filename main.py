@@ -5,6 +5,8 @@ import json
 import os
 from google.oauth2.service_account import Credentials
 
+# ---------------- CONFIG ---------------- #
+
 URLS = [
     "https://www.alpshealthcare.com.sg/strategic-procurement/national-sourcing-events/",
     "https://www.alpshealthcare.com.sg/strategic-procurement/pharmaceutical-sourcing-events/",
@@ -15,7 +17,12 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9"
 }
 
-# ---------------- AUTH ---------------- #
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+
+# ---------------- GOOGLE AUTH ---------------- #
 
 def get_google_creds():
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
@@ -25,19 +32,23 @@ def get_google_creds():
 
     creds_dict = json.loads(creds_json)
 
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-
-    return Credentials.from_service_account_info(
+    credentials = Credentials.from_service_account_info(
         creds_dict,
-        scopes=scopes
+        scopes=SCOPES
     )
+
+    return credentials
 
 # ---------------- SCRAPER ---------------- #
 
 def fetch(url):
-    res = requests.get(url, headers=HEADERS, timeout=30)
-    res.raise_for_status()
-    return res.text
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=30)
+        res.raise_for_status()
+        return res.text
+    except Exception as e:
+        print(f"Error fetching {url}: {e}")
+        return ""
 
 
 def extract_events(html, url):
@@ -96,7 +107,9 @@ def main():
     for url in URLS:
         print(f"Scraping: {url}")
         html = fetch(url)
-        all_data.extend(extract_events(html, url))
+
+        if html:
+            all_data.extend(extract_events(html, url))
 
     print(f"Total rows found: {len(all_data)}")
 
