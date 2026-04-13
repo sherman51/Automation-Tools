@@ -81,7 +81,7 @@ def connect_sheet():
     creds = get_google_creds()
     client = gspread.authorize(creds)
 
-    sheet = client.open("ALPS Sourcing Events").sheet1
+    sheet = client.open("Sourcing Events").sheet1
     return sheet
 
 
