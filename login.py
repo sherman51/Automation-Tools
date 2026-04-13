@@ -4,23 +4,21 @@ ARIBA_URL = "https://service.ariba.com/Sourcing.aw/"
 
 def main():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
 
-        context = browser.launch_persistent_context(
+        context = p.chromium.launch_persistent_context(
             user_data_dir="ariba_profile",
-            headless=True
+            headless=False
         )
 
         page = context.new_page()
         page.goto(ARIBA_URL)
 
-        print("Waiting for login session...")
+        print("👉 Login manually (if needed)")
 
-        # give time in case session already exists via cookies/redirect
-        page.wait_for_timeout(60000)
+        # give time for login / session
+        page.wait_for_timeout(180000)
 
         context.close()
-        browser.close()
 
 if __name__ == "__main__":
     main()
