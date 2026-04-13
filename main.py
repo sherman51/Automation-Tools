@@ -101,8 +101,6 @@ def extract_events(html, url):
 
 def extract_rfp_numbers(data):
     rfp_set = set()
-
-    # ✅ FIXED: supports GPOR
     pattern = re.compile(r'\b(?:RFP|GPOR)[-\s]?\w+\b', re.IGNORECASE)
 
     for row in data:
@@ -145,6 +143,7 @@ def build_driver(headless=True):
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-blink-features=AutomationControlled")
+
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
@@ -156,17 +155,56 @@ def build_driver(headless=True):
 
     return driver
 
-# ---------------- LOGIN ---------------- #
+# ---------------- ARIBA LOGIN ---------------- #
 
 def ariba_login(driver, wait):
+    print("→ Opening Ariba login...")
     driver.get(ARIBA_LOGIN_URL)
     time.sleep(5)
 
+    print("URL:", driver.current_url)
+    print("Title:", driver.title)
+
+    driver.save_screenshot("/tmp/ariba_login_page.png")
+    with open("/tmp/ariba_login_page.html", "w") as f:
+        f.write(driver.page_source)
+
+    # Username
     username = wait.until(EC.presence_of_element_located((By.NAME, "userid")))
     username.send_keys(ARIBA_USERNAME)
+    print("✓ Username entered")
 
-    # 🔥 ROBUST NEXT CLICK
-    next_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[contains(.,'Next')] | //input[@value='Next']")))
+    # Find ANY button
+    buttons = driver.find_elements(By.XPATH, "//button | //input[@type='submit']")
+    print(f"Found {len(buttons)} buttons")
+
+    next_btn = None
+
+    for b in buttons:
+        try:
+            text = (b.text or "").lower()
+            val = (b.get_attribute("value") or "").lower()
+
+            print("Button:", text, "|", val, "| displayed:", b.is_displayed())
+
+            if "next" in text or "next" in val:
+                if b.is_displayed():
+                    next_btn = b
+                    break
+        except:
+            continue
+
+    # fallback
+    if not next_btn:
+        print("⚠️ Using fallback button")
+        for b in buttons:
+            if b.is_displayed():
+                next_btn = b
+                break
+
+    if not next_btn:
+        raise Exception("No clickable button found")
+
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", next_btn)
     time.sleep(1)
 
@@ -175,47 +213,40 @@ def ariba_login(driver, wait):
     except:
         ActionChains(driver).move_to_element(next_btn).click().perform()
 
-    print("✓ Clicked Next")
+    print("✓ Clicked button")
 
-    # ✅ WAIT for password
-    wait.until(lambda d: len(d.find_elements(By.XPATH, "//input[@type='password']")) > 0)
+    # Wait for password
+    print("⏳ Waiting for password field...")
+    try:
+        wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
+    except:
+        driver.save_screenshot("/tmp/ariba_no_password.png")
+        with open("/tmp/ariba_after_click.html", "w") as f:
+            f.write(driver.page_source)
+        raise Exception("Password field never appeared")
 
     password = driver.find_element(By.XPATH, "//input[@type='password']")
     password.send_keys(ARIBA_PASSWORD)
-
-    print("✓ Password entered")
-
     password.send_keys(Keys.RETURN)
+
+    print("✓ Login submitted")
     time.sleep(5)
 
-    print("✓ Login done")
-
-# ---------------- SEARCH ---------------- #
+# ---------------- ARIBA SEARCH ---------------- #
 
 def ariba_search_rfp(driver, wait, rfp_no):
     print(f"Searching {rfp_no}")
-
     url = f"https://service.ariba.com/Discovery.aw/ad/rfxList?rfxId={rfp_no}"
     driver.get(url)
     time.sleep(3)
 
-    return parse_ariba(driver, rfp_no)
-
-def parse_ariba(driver, rfp):
     soup = BeautifulSoup(driver.page_source, "html.parser")
 
-    result = {
-        "RFP No.": rfp,
-        "Lead Title": "",
-        "Respond By Date": "",
+    return {
+        "RFP No.": rfp_no,
+        "Lead Title": soup.title.text.strip() if soup.title else "",
         "Ariba URL": driver.current_url
     }
-
-    title = soup.find("title")
-    if title:
-        result["Lead Title"] = title.text.strip()
-
-    return result
 
 # ---------------- MAIN ---------------- #
 
@@ -238,7 +269,6 @@ def run_ariba_search(rfps):
 
 def main():
     sheet = connect_spreadsheet()
-
     pharma_data = []
 
     for url, name in URL_SHEET_MAP.items():
