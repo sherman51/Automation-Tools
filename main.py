@@ -183,140 +183,130 @@ def build_driver(headless=True):
 
 
 def ariba_login(driver, wait):
-    """Log into Ariba using two-step login with screenshot debugging and iframe handling."""
+    """Log into Ariba - genuine two-step login (username → Next → password)."""
     print("  → Navigating to Ariba login...")
     driver.get(ARIBA_LOGIN_URL)
     time.sleep(5)
 
-    # DEBUG: Save screenshot of initial login page
     driver.save_screenshot("/tmp/ariba_step1_login_page.png")
-    print("  📸 Screenshot saved: ariba_step1_login_page.png")
+    print(f"  📸 Screenshot saved: ariba_step1_login_page.png")
     print(f"  📄 Page title: {driver.title}")
     print(f"  🌐 Current URL: {driver.current_url}")
 
-    # --- Step 1: Enter username (check iframes too) ---
-    username_field = None
-
-    # First try directly on the page
+    # --- Step 1: Enter username ---
     try:
         username_field = wait.until(EC.presence_of_element_located(
-            (By.XPATH, "//input[@type='text' or @type='email' or @name='UserName' or @id='UserName']")
+            (By.NAME, "userid")
         ))
-        print("  ✓ Username field found on main page")
-    except Exception:
-        print("  ⚠️  Username not on main page, checking iframes...")
-
-    # If not found, check inside iframes
-    if not username_field:
-        iframes = driver.find_elements(By.TAG_NAME, "iframe")
-        print(f"  🔍 Found {len(iframes)} iframe(s)")
-        for i, iframe in enumerate(iframes):
-            try:
-                driver.switch_to.frame(iframe)
-                username_field = driver.find_element(
-                    By.XPATH, "//input[@type='text' or @type='email' or @name='UserName' or @id='UserName']"
-                )
-                print(f"  ✓ Username field found in iframe {i}")
-                break
-            except Exception:
-                driver.switch_to.default_content()
-
-    if not username_field:
+        print("  ✓ Username field found")
+    except Exception as e:
         driver.save_screenshot("/tmp/ariba_error_no_username.png")
-        print("  📸 Screenshot saved: ariba_error_no_username.png")
-        raise Exception("Could not find username field on page or in any iframe")
+        raise Exception(f"Could not find username field: {e}")
 
     username_field.clear()
     username_field.send_keys(ARIBA_USERNAME)
     print("  ✓ Username entered")
 
-    # --- Step 2: Click Next ---
-    try:
-        next_btn = wait.until(EC.element_to_be_clickable(
-            (By.XPATH, (
-                "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'next')]"
-                " | //input[@type='submit' and contains(translate(@value,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'next')]"
-                " | //button[@type='submit']"
-            ))
-        ))
-        next_btn.click()
-        print("  ✓ Clicked Next")
-    except Exception:
-        username_field.send_keys(Keys.RETURN)
-        print("  ✓ Pressed Enter on username (Next fallback)")
+    # --- Step 2: Click the "Next" button ---
+    # The button is a styled <input type="submit"> or <button> with value/text "Next"
+    # Try multiple selectors in order of specificity
+    next_clicked = False
+    next_selectors = [
+        (By.XPATH, "//input[@type='submit' and @value='Next']"),
+        (By.XPATH, "//button[normalize-space(text())='Next']"),
+        (By.XPATH, "//input[@type='submit']"),
+        (By.XPATH, "//button[@type='submit']"),
+        (By.XPATH, "//*[normalize-space(text())='Next']"),
+    ]
 
-    # Wait longer for password page to load
-    time.sleep(6)
+    for by, selector in next_selectors:
+        try:
+            btn = wait.until(EC.element_to_be_clickable((by, selector)))
+            # Scroll into view and click via JavaScript to bypass any overlay issues
+            driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+            driver.execute_script("arguments[0].click();", btn)
+            next_clicked = True
+            print(f"  ✓ Clicked Next button ({selector})")
+            break
+        except Exception:
+            continue
 
-    # DEBUG: Screenshot after clicking Next
+    if not next_clicked:
+        # Last resort: submit the form via JS
+        try:
+            driver.execute_script("document.querySelector('form').submit();")
+            next_clicked = True
+            print("  ✓ Submitted form via JavaScript (Next fallback)")
+        except Exception as e:
+            raise Exception(f"Could not click Next button: {e}")
+
+    # --- Step 3: Wait for password field to appear ---
+    # After clicking Next, Ariba dynamically shows the password field on the SAME page
+    print("  ⏳ Waiting for password field to appear...")
+    time.sleep(3)
+
     driver.save_screenshot("/tmp/ariba_step2_after_next.png")
-    print("  📸 Screenshot saved: ariba_step2_after_next.png")
+    print(f"  📸 Screenshot saved: ariba_step2_after_next.png")
     print(f"  📄 Page title: {driver.title}")
     print(f"  🌐 Current URL: {driver.current_url}")
 
-    # Print all input fields visible on page (helps identify selectors)
-    inputs = driver.find_elements(By.TAG_NAME, "input")
-    print(f"  🔍 Found {len(inputs)} input field(s) on page:")
-    for inp in inputs:
-        print(f"      type='{inp.get_attribute('type')}' name='{inp.get_attribute('name')}' id='{inp.get_attribute('id')}' placeholder='{inp.get_attribute('placeholder')}'")
-
-    # --- Step 3: Enter password (check iframes too) ---
-    password_field = None
-
-    # Try main page first
     try:
-        password_field = wait.until(EC.presence_of_element_located(
+        password_field = wait.until(EC.visibility_of_element_located(
             (By.XPATH, "//input[@type='password']")
         ))
-        print("  ✓ Password field found on main page")
+        print("  ✓ Password field appeared")
     except Exception:
-        print("  ⚠️  Password not on main page, checking iframes...")
-        driver.switch_to.default_content()
-        iframes = driver.find_elements(By.TAG_NAME, "iframe")
-        print(f"  🔍 Found {len(iframes)} iframe(s)")
-        for i, iframe in enumerate(iframes):
-            try:
-                driver.switch_to.frame(iframe)
-                password_field = driver.find_element(By.XPATH, "//input[@type='password']")
-                print(f"  ✓ Password field found in iframe {i}")
-                break
-            except Exception:
-                driver.switch_to.default_content()
-
-    if not password_field:
+        # Debug: print all inputs now visible
+        inputs = driver.find_elements(By.TAG_NAME, "input")
+        print(f"  🔍 Inputs after Next ({len(inputs)} total):")
+        for inp in inputs:
+            print(f"      type='{inp.get_attribute('type')}' name='{inp.get_attribute('name')}' id='{inp.get_attribute('id')}'")
         driver.save_screenshot("/tmp/ariba_error_no_password.png")
-        print("  📸 Screenshot saved: ariba_error_no_password.png")
-        raise Exception("Could not find password field on page or in any iframe")
+        raise Exception("Password field never appeared after clicking Next")
 
     password_field.clear()
     password_field.send_keys(ARIBA_PASSWORD)
     print("  ✓ Password entered")
 
-    # --- Step 4: Click Login ---
-    try:
-        login_btn = wait.until(EC.element_to_be_clickable(
-            (By.XPATH, (
-                "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'log')]"
-                " | //button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign')]"
-                " | //input[@type='submit']"
-                " | //button[@type='submit']"
-            ))
-        ))
-        login_btn.click()
-        print("  ✓ Clicked Login")
-    except Exception:
+    # --- Step 4: Click the Login/Sign In button ---
+    login_clicked = False
+    login_selectors = [
+        (By.XPATH, "//input[@type='submit' and (contains(@value,'Log') or contains(@value,'Sign'))]"),
+        (By.XPATH, "//button[contains(normalize-space(text()),'Log') or contains(normalize-space(text()),'Sign')]"),
+        (By.XPATH, "//input[@type='submit']"),
+        (By.XPATH, "//button[@type='submit']"),
+    ]
+
+    for by, selector in login_selectors:
+        try:
+            btn = wait.until(EC.element_to_be_clickable((by, selector)))
+            driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+            driver.execute_script("arguments[0].click();", btn)
+            login_clicked = True
+            print(f"  ✓ Clicked Login button ({selector})")
+            break
+        except Exception:
+            continue
+
+    if not login_clicked:
         password_field.send_keys(Keys.RETURN)
         print("  ✓ Pressed Enter on password (Login fallback)")
 
-    time.sleep(6)
+    time.sleep(8)
 
-    # DEBUG: Screenshot after login attempt
     driver.save_screenshot("/tmp/ariba_step3_after_login.png")
-    print("  📸 Screenshot saved: ariba_step3_after_login.png")
+    print(f"  📸 Screenshot saved: ariba_step3_after_login.png")
     print(f"  📄 Page title: {driver.title}")
     print(f"  🌐 Current URL: {driver.current_url}")
 
-    print("  ✓ Login flow complete")
+    # Verify we're no longer on the login page
+    if "Authenticator" in driver.current_url or "login" in driver.current_url.lower():
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        errors = soup.find_all(attrs={"class": lambda c: c and "error" in c.lower()})
+        err_text = " | ".join(e.get_text(strip=True) for e in errors if e.get_text(strip=True))
+        raise Exception(f"Login failed — still on login page. Errors: {err_text or 'none visible'}")
+
+    print("  ✓ Login complete")
 
 
 def ariba_search_rfp(driver, wait, rfp_no):
