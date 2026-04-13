@@ -1,6 +1,8 @@
 import requests
 from bs4 import BeautifulSoup
 import gspread
+import json
+import os
 from google.oauth2.service_account import Credentials
 
 URLS = [
@@ -8,7 +10,27 @@ URLS = [
     "https://www.alpshealthcare.com.sg/strategic-procurement/pharmaceutical-sourcing-events/",
 ]
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Accept-Language": "en-US,en;q=0.9"
+}
+
+# ---------------- AUTH ---------------- #
+
+def get_google_creds():
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+
+    if not creds_json:
+        raise Exception("Missing GOOGLE_CREDENTIALS_JSON environment variable")
+
+    creds_dict = json.loads(creds_json)
+
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+
+    return Credentials.from_service_account_info(
+        creds_dict,
+        scopes=scopes
+    )
 
 # ---------------- SCRAPER ---------------- #
 
@@ -18,9 +40,9 @@ def fetch(url):
     return res.text
 
 
-def extract_data(html, url):
+def extract_events(html, url):
     soup = BeautifulSoup(html, "html.parser")
-    rows = []
+    results = []
 
     tables = soup.find_all("table")
 
@@ -38,30 +60,21 @@ def extract_data(html, url):
             for i in range(min(len(headers), len(cols))):
                 row[headers[i]] = cols[i]
 
-            rows.append(row)
+            results.append(row)
 
-    return rows
-
+    return results
 
 # ---------------- GOOGLE SHEETS ---------------- #
 
 def connect_sheet():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-
-    creds = Credentials.from_service_account_file(
-        "credentials.json",
-        scopes=scopes
-    )
-
+    creds = get_google_creds()
     client = gspread.authorize(creds)
 
-    # MUST match your Google Sheet name exactly
-    sheet = client.open("Sourcing Events").sheet1
-
+    sheet = client.open("ALPS Sourcing Events").sheet1
     return sheet
 
 
-def write_sheet(sheet, data):
+def write_to_sheet(sheet, data):
     sheet.clear()
 
     if not data:
@@ -75,21 +88,20 @@ def write_sheet(sheet, data):
     for row in data:
         sheet.append_row([row.get(h, "") for h in headers])
 
-
 # ---------------- MAIN ---------------- #
 
 def main():
-    all_rows = []
+    all_data = []
 
     for url in URLS:
         print(f"Scraping: {url}")
         html = fetch(url)
-        all_rows.extend(extract_data(html, url))
+        all_data.extend(extract_events(html, url))
 
-    print(f"Total rows found: {len(all_rows)}")
+    print(f"Total rows found: {len(all_data)}")
 
     sheet = connect_sheet()
-    write_sheet(sheet, all_rows)
+    write_to_sheet(sheet, all_data)
 
     print("✅ Google Sheet updated successfully")
 
