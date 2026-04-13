@@ -103,7 +103,7 @@ def extract_events(html, url):
                 }
                 
                 if current_month:
-                    row["month"] = current_month
+                    row["PERIOD"] = current_month
 
                 for i in range(min(len(headers), len(cols))):
                     row[headers[i]] = cols[i]
