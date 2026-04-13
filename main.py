@@ -39,12 +39,10 @@ def get_google_creds():
 
     creds_dict = json.loads(creds_json)
 
-    credentials = Credentials.from_service_account_info(
+    return Credentials.from_service_account_info(
         creds_dict,
         scopes=SCOPES
     )
-
-    return credentials
 
 
 def connect_spreadsheet():
@@ -57,28 +55,20 @@ def connect_spreadsheet():
 
 def get_or_create_worksheet(spreadsheet, sheet_name):
     try:
-        worksheet = spreadsheet.worksheet(sheet_name)
+        return spreadsheet.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(
-            title=sheet_name,
-            rows="1000",
-            cols="20"
-        )
-    return worksheet
+        return spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols="20")
 
 
 def write_to_sheet(sheet, data):
     sheet.clear()
 
     if not data:
-        print("No data found")
+        print("⚠️ No data to write")
         return
 
     headers = list(data[0].keys())
-    rows = [headers] + [
-        [row.get(h, "") for h in headers]
-        for row in data
-    ]
+    rows = [headers] + [[row.get(h, "") for h in headers] for row in data]
 
     sheet.update(rows)
 
@@ -105,24 +95,23 @@ def extract_events(html, url):
         if tag.name in ["h1", "h2", "h3", "h4"]:
             text = tag.get_text(strip=True)
 
-            if any(month in text.lower() for month in [
+            if any(m in text.lower() for m in [
                 "january","february","march","april","may","june",
                 "july","august","september","october","november","december"
             ]):
                 current_month = text
 
         elif tag.name == "table":
-            table = tag
-            rows = table.find_all("tr")
+            rows = tag.find_all("tr")
 
             if not rows:
                 continue
 
-            headers = [h.get_text(strip=True) for h in table.find_all("th")]
+            headers = [h.get_text(strip=True) for h in tag.find_all("th")]
 
             if not headers:
-                first_row_cols = rows[0].find_all(["td", "th"])
-                headers = [c.get_text(strip=True) for c in first_row_cols]
+                first_row = rows[0].find_all(["td", "th"])
+                headers = [c.get_text(strip=True) for c in first_row]
                 rows = rows[1:]
 
             for tr in rows:
@@ -153,14 +142,14 @@ def get_rfp_numbers(spreadsheet):
     rfps = []
 
     for row in data:
-        rfp_no = row.get("RFP No.")
-        if rfp_no:
-            rfps.append(str(rfp_no).strip())
+        rfp = row.get("RFP No.")
+        if rfp:
+            rfps.append(str(rfp).strip())
 
     return list(set(rfps))
 
 
-# ---------------- ARIBA LOGIN (ONE TIME) ---------------- #
+# ---------------- ARIBA SESSION ---------------- #
 
 def init_ariba_session():
     with sync_playwright() as p:
@@ -170,12 +159,12 @@ def init_ariba_session():
 
         page.goto("https://service.ariba.com/Sourcing.aw/")
 
-        print("👉 Please login manually (SSO/MFA)...")
-        page.wait_for_timeout(180000)  # 3 minutes
+        print("👉 Login manually (SSO/MFA)...")
+        page.wait_for_timeout(180000)
 
         context.storage_state(path=SESSION_FILE)
 
-        print("✅ Ariba session saved")
+        print("✅ Session saved")
         browser.close()
 
 
@@ -186,7 +175,6 @@ def search_ariba(keyword):
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-
         context = browser.new_context(storage_state=SESSION_FILE)
         page = context.new_page()
 
@@ -199,6 +187,8 @@ def search_ariba(keyword):
         page.wait_for_timeout(5000)
 
         items = page.query_selector_all(".search-result-item")
+
+        print(f"DEBUG: {keyword} -> {len(items)} results")
 
         for item in items:
             try:
@@ -222,29 +212,39 @@ def search_ariba(keyword):
     return results
 
 
+# ---------------- BUILD TENDER ALERTS ---------------- #
+
 def build_tender_alerts(rfp_list):
     all_results = []
 
     for rfp in rfp_list:
         print(f"Searching Ariba: {rfp}")
 
-        try:
-            results = search_ariba(rfp)
-            all_results.extend(results)
+        results = search_ariba(rfp)
 
-        except Exception as e:
-            print(f"Error for {rfp}: {e}")
+        print(f"Found {len(results)} results for {rfp}")
+
+        all_results.extend(results)
 
         time.sleep(1.5)
 
     return all_results
 
 
-# ---------------- TENDER ALERTS ---------------- #
+# ---------------- TENDER SHEET ---------------- #
 
 def write_tender_alerts(spreadsheet, data):
     sheet = get_or_create_worksheet(spreadsheet, "Tender Alerts")
-    write_to_sheet(sheet, data)
+    sheet.clear()
+
+    if not data:
+        print("⚠️ Tender Alerts empty")
+        return
+
+    headers = list(data[0].keys())
+    rows = [headers] + [[row.get(h, "") for h in headers] for row in data]
+
+    sheet.update(rows)
 
 
 # ---------------- MAIN ---------------- #
@@ -253,33 +253,34 @@ def main():
     spreadsheet = connect_spreadsheet()
 
     # STEP 1: SCRAPE ALPS
-    all_scraped_data = []
-
     for url, sheet_name in URL_SHEET_MAP.items():
         print(f"Scraping: {url}")
 
         html = fetch(url)
         data = extract_events(html, url) if html else []
 
-        worksheet = get_or_create_worksheet(spreadsheet, sheet_name)
-        write_to_sheet(worksheet, data)
+        print(f"{sheet_name}: {len(data)} rows")
 
-        all_scraped_data.extend(data)
+        sheet = get_or_create_worksheet(spreadsheet, sheet_name)
+        write_to_sheet(sheet, data)
 
-    # STEP 2: GET RFP NUMBERS
+    # STEP 2: GET RFPs
     rfp_list = get_rfp_numbers(spreadsheet)
-    print(f"Found {len(rfp_list)} RFP numbers")
+    print(f"Found RFPs: {len(rfp_list)}")
 
-    rfp_list = rfp_list[:30]  # safety limit
+    rfp_list = rfp_list[:30]
 
-    # STEP 3: SEARCH ARIBA
+    print("RFP SAMPLE:", rfp_list[:5])
+
+    # STEP 3: ARIBA SEARCH
     tender_alerts = build_tender_alerts(rfp_list)
-    print(f"Found {len(tender_alerts)} Ariba results")
+
+    print(f"Total Tender Alerts: {len(tender_alerts)}")
 
     # STEP 4: WRITE RESULTS
     write_tender_alerts(spreadsheet, tender_alerts)
 
-    print("✅ Pipeline complete")
+    print("✅ DONE")
 
 
 if __name__ == "__main__":
