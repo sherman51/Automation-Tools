@@ -57,42 +57,58 @@ def extract_events(html, url):
     soup = BeautifulSoup(html, "html.parser")
     results = []
 
-    tables = soup.find_all("table")
+    current_month = None
 
-    for table in tables:
-        rows = table.find_all("tr")
+    # Walk through page in order
+    for tag in soup.find_all(["h1", "h2", "h3", "h4", "table"]):
 
-        if not rows:
-            continue
+        # ✅ Capture month headers
+        if tag.name in ["h1", "h2", "h3", "h4"]:
+            text = tag.get_text(strip=True)
 
-        # Try to get headers from <th>
-        headers = [h.get_text(strip=True) for h in table.find_all("th")]
+            # Basic check for month/year text
+            if any(month in text.lower() for month in [
+                "january","february","march","april","may","june",
+                "july","august","september","october","november","december"
+            ]):
+                current_month = text
 
-        # ✅ If no <th>, use first row as header
-        if not headers:
-            first_row_cols = rows[0].find_all(["td", "th"])
-            headers = [c.get_text(strip=True) for c in first_row_cols]
-            rows = rows[1:]  # skip header row
+        # ✅ Process table under that month
+        elif tag.name == "table":
+            table = tag
+            rows = table.find_all("tr")
 
-        for tr in rows:
-            cols = [td.get_text(strip=True) for td in tr.find_all("td")]
-
-            if not cols:
+            if not rows:
                 continue
 
-            # ✅ Skip repeated header rows inside table
-            if cols == headers:
-                continue
+            headers = [h.get_text(strip=True) for h in table.find_all("th")]
 
-            row = {"source_url": url}
+            # Fallback header logic
+            if not headers:
+                first_row_cols = rows[0].find_all(["td", "th"])
+                headers = [c.get_text(strip=True) for c in first_row_cols]
+                rows = rows[1:]
 
-            # Map columns safely
-            for i in range(min(len(headers), len(cols))):
-                row[headers[i]] = cols[i]
+            for tr in rows:
+                cols = [td.get_text(strip=True) for td in tr.find_all("td")]
 
-            results.append(row)
+                if not cols:
+                    continue
 
-    # Fallback if no tables found
+                if cols == headers:
+                    continue
+
+                row = {
+                    "source_url": url,
+                    "month": current_month  # ✅ ADD THIS
+                }
+
+                for i in range(min(len(headers), len(cols))):
+                    row[headers[i]] = cols[i]
+
+                results.append(row)
+
+    # Fallback (unchanged)
     if not results:
         items = soup.find_all("li")
 
