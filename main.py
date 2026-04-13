@@ -1,73 +1,98 @@
 import requests
 from bs4 import BeautifulSoup
-import json
-import time
+import gspread
+from google.oauth2.service_account import Credentials
 
-BASE_URLS = [
+URLS = [
     "https://www.alpshealthcare.com.sg/strategic-procurement/national-sourcing-events/",
     "https://www.alpshealthcare.com.sg/strategic-procurement/pharmaceutical-sourcing-events/",
 ]
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; ALPS-Scraper/1.0)"
-}
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-def fetch(url, retries=3):
-    for i in range(retries):
-        try:
-            res = requests.get(url, headers=HEADERS, timeout=20)
-            res.raise_for_status()
-            return res.text
-        except Exception as e:
-            print(f"Retry {i+1}/{retries} failed for {url}: {e}")
-            time.sleep(2)
-    return None
+# ---------------- SCRAPER ---------------- #
 
-def extract_tables(html, url):
+def fetch(url):
+    res = requests.get(url, headers=HEADERS, timeout=30)
+    res.raise_for_status()
+    return res.text
+
+
+def extract_data(html, url):
     soup = BeautifulSoup(html, "html.parser")
-    results = []
+    rows = []
 
     tables = soup.find_all("table")
 
     for table in tables:
-        headers = [th.get_text(strip=True) for th in table.find_all("th")]
+        headers = [h.get_text(strip=True) for h in table.find_all("th")]
 
-        for row in table.find_all("tr")[1:]:
-            cols = [td.get_text(strip=True) for td in row.find_all("td")]
+        for tr in table.find_all("tr")[1:]:
+            cols = [td.get_text(strip=True) for td in tr.find_all("td")]
 
             if not cols:
                 continue
 
-            event = {
-                "source_url": url
-            }
+            row = {"source_url": url}
 
             for i in range(min(len(headers), len(cols))):
-                event[headers[i]] = cols[i]
+                row[headers[i]] = cols[i]
 
-            results.append(event)
+            rows.append(row)
 
-    return results
+    return rows
 
-def scrape_all():
-    all_events = []
 
-    for url in BASE_URLS:
-        print(f"Scraping {url}")
+# ---------------- GOOGLE SHEETS ---------------- #
+
+def connect_sheet():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+
+    creds = Credentials.from_service_account_file(
+        "credentials.json",
+        scopes=scopes
+    )
+
+    client = gspread.authorize(creds)
+
+    # MUST match your Google Sheet name exactly
+    sheet = client.open("Sourcing Events").sheet1
+
+    return sheet
+
+
+def write_sheet(sheet, data):
+    sheet.clear()
+
+    if not data:
+        print("No data found")
+        return
+
+    headers = list(data[0].keys())
+
+    sheet.append_row(headers)
+
+    for row in data:
+        sheet.append_row([row.get(h, "") for h in headers])
+
+
+# ---------------- MAIN ---------------- #
+
+def main():
+    all_rows = []
+
+    for url in URLS:
+        print(f"Scraping: {url}")
         html = fetch(url)
+        all_rows.extend(extract_data(html, url))
 
-        if not html:
-            continue
+    print(f"Total rows found: {len(all_rows)}")
 
-        events = extract_tables(html, url)
-        all_events.extend(events)
+    sheet = connect_sheet()
+    write_sheet(sheet, all_rows)
 
-    return all_events
+    print("✅ Google Sheet updated successfully")
+
 
 if __name__ == "__main__":
-    data = scrape_all()
-
-    with open("alps_sourcing_events.json", "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-    print(f"Done. Extracted {len(data)} events.")
+    main()
