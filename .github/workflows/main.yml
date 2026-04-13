@@ -1,0 +1,20 @@
+jobs:
+  create-session:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.11
+
+      - run: pip install playwright
+      - run: playwright install
+
+      - name: Run login (headed browser not possible, so use persistent context trick)
+        run: python login.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ariba-session
+          path: ariba_state.json
