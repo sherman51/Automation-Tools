@@ -4,8 +4,6 @@ import gspread
 import json
 import os
 import time
-import subprocess
-import sys
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
@@ -17,51 +15,26 @@ URL_SHEET_MAP = {
 }
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    "Accept-Language": "en-US,en;q=0.9"
+    "User-Agent": "Mozilla/5.0"
 }
+
+SPREADSHEET_ID = "1ZGf468X845aw8pJ4hmdyYHsV7JrrHhZsCxq4mXLrRdg"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
-SPREADSHEET_ID = "1ZGf468X845aw8pJ4hmdyYHsV7JrrHhZsCxq4mXLrRdg"
-
-ARIBA_URL = "https://service.ariba.com/Sourcing.aw/advancesearch"
+ARIBA_URL = "https://service.ariba.com/Sourcing.aw/"
 SESSION_FILE = "ariba_state.json"
 
-# ---------------- PLAYWRIGHT BOOTSTRAP (CRITICAL FIX) ---------------- #
 
-def ensure_playwright_ready():
-    """
-    Fixes CI crash: missing Chromium executable
-    Runs ONLY ONCE at startup
-    """
-    try:
-        from playwright.sync_api import sync_playwright
+# ---------------- GOOGLE SHEETS ---------------- #
 
-        with sync_playwright() as p:
-            p.chromium.launch(headless=True)
-
-    except Exception:
-        print("⚠️ Installing Playwright Chromium (first run only)...")
-
-        subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            check=True
-        )
-
-        print("✅ Chromium installed successfully")
-
-
-# ---------------- GOOGLE AUTH ---------------- #
-
-def get_google_creds():
+def get_creds():
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-
     if not creds_json:
-        raise Exception("Missing GOOGLE_CREDENTIALS_JSON environment variable")
+        raise Exception("Missing GOOGLE_CREDENTIALS_JSON")
 
     creds_dict = json.loads(creds_json)
 
@@ -71,44 +44,24 @@ def get_google_creds():
     )
 
 
-def connect_spreadsheet():
-    creds = get_google_creds()
-    client = gspread.authorize(creds)
+def connect_sheet():
+    client = gspread.authorize(get_creds())
     return client.open_by_key(SPREADSHEET_ID)
 
 
-# ---------------- SHEETS ---------------- #
-
-def get_or_create_worksheet(spreadsheet, sheet_name):
+def get_sheet(spreadsheet, name):
     try:
-        return spreadsheet.worksheet(sheet_name)
-    except gspread.exceptions.WorksheetNotFound:
-        return spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols="20")
-
-
-def write_to_sheet(sheet, data):
-    sheet.clear()
-
-    if not data:
-        print("⚠️ No data to write")
-        return
-
-    headers = list(data[0].keys())
-    rows = [headers] + [[row.get(h, "") for h in headers] for row in data]
-
-    sheet.update(rows)
+        return spreadsheet.worksheet(name)
+    except:
+        return spreadsheet.add_worksheet(title=name, rows="1000", cols="20")
 
 
 # ---------------- SCRAPER ---------------- #
 
 def fetch(url):
-    try:
-        res = requests.get(url, headers=HEADERS, timeout=30)
-        res.raise_for_status()
-        return res.text
-    except Exception as e:
-        print(f"Error fetching {url}: {e}")
-        return ""
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    return r.text
 
 
 def extract_events(html, url):
@@ -129,25 +82,21 @@ def extract_events(html, url):
 
         elif tag.name == "table":
             rows = tag.find_all("tr")
-
             if not rows:
                 continue
 
             headers = [h.get_text(strip=True) for h in tag.find_all("th")]
 
             if not headers:
-                first_row = rows[0].find_all(["td", "th"])
-                headers = [c.get_text(strip=True) for c in first_row]
+                headers = [c.get_text(strip=True) for c in rows[0].find_all("td")]
                 rows = rows[1:]
 
-            for tr in rows:
-                cols = [td.get_text(strip=True) for td in tr.find_all("td")]
-
+            for r in rows:
+                cols = [c.get_text(strip=True) for c in r.find_all("td")]
                 if not cols:
                     continue
 
                 row = {"source_url": url}
-
                 if current_month:
                     row["PERIOD"] = current_month
 
@@ -161,34 +110,38 @@ def extract_events(html, url):
 
 # ---------------- RFP EXTRACTION ---------------- #
 
-def get_rfp_numbers(spreadsheet):
-    sheet = spreadsheet.worksheet("Pharmaceutical Sourcing Events")
+def get_rfps(sheet):
     data = sheet.get_all_records()
-
     rfps = []
 
-    for row in data:
-        rfp = row.get("RFP No.")
-        if rfp:
-            rfps.append(str(rfp).strip())
+    for r in data:
+        val = r.get("RFP No.")
+        if val:
+            rfps.append(str(val).strip())
 
     return list(set(rfps))
 
 
 # ---------------- ARIBA SESSION ---------------- #
 
-def init_ariba_session():
+def ensure_session():
+    if not os.path.exists(SESSION_FILE):
+        print("⚠️ No session found. Run login once.")
+        return False
+    return True
+
+
+def init_session():
+    print("👉 Opening browser for login...")
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-    headless=True,
-    args=["--no-sandbox", "--disable-dev-shm-usage"]
-)
+        browser = p.chromium.launch(headless=False)
         context = browser.new_context()
         page = context.new_page()
 
-        page.goto("https://service.ariba.com/Sourcing.aw/")
+        page.goto(ARIBA_URL)
 
-        print("👉 Please login manually (SSO/MFA)...")
+        print("🔐 Please login manually...")
         page.wait_for_timeout(180000)
 
         context.storage_state(path=SESSION_FILE)
@@ -197,18 +150,13 @@ def init_ariba_session():
         browser.close()
 
 
-def ensure_session():
-    if not os.path.exists(SESSION_FILE):
-        print("⚠️ Missing Ariba session → launching login flow")
-        init_ariba_session()
-
-
 # ---------------- ARIBA SEARCH ---------------- #
 
-def search_ariba(keyword):
-    results = []
+def search_ariba(rfp):
+    if not ensure_session():
+        return []
 
-    ensure_session()
+    results = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -223,30 +171,26 @@ def search_ariba(keyword):
         page.wait_for_timeout(4000)
 
         try:
-            page.fill("input[type='search']", keyword)
+            page.fill("input[type='search']", rfp)
             page.keyboard.press("Enter")
         except:
-            print(f"⚠️ Search input not found for {keyword}")
             browser.close()
             return []
 
-        page.wait_for_timeout(6000)
+        page.wait_for_timeout(5000)
 
         items = page.query_selector_all(".search-result-item")
 
-        print(f"DEBUG: {keyword} → {len(items)} results")
-
-        for item in items:
+        for i in items:
             try:
-                title_el = item.query_selector(".title")
-                link_el = item.query_selector("a")
+                title = i.query_selector(".title")
+                link = i.query_selector("a")
 
                 results.append({
-                    "RFP No": keyword,
-                    "title": title_el.inner_text() if title_el else "",
-                    "link": link_el.get_attribute("href") if link_el else ""
+                    "RFP No": rfp,
+                    "title": title.inner_text() if title else "",
+                    "link": link.get_attribute("href") if link else ""
                 })
-
             except:
                 continue
 
@@ -255,29 +199,26 @@ def search_ariba(keyword):
     return results
 
 
-def build_tender_alerts(rfp_list):
-    all_results = []
+def build_alerts(rfps):
+    all_data = []
 
-    for rfp in rfp_list:
-        print(f"Searching Ariba: {rfp}")
-
+    for r in rfps:
+        print(f"Searching Ariba: {r}")
         try:
-            res = search_ariba(rfp)
+            res = search_ariba(r)
             print(f"Found {len(res)} results")
-            all_results.extend(res)
-
+            all_data.extend(res)
         except Exception as e:
-            print(f"Error for {rfp}: {e}")
+            print(f"Error {r}: {e}")
 
-        time.sleep(1.5)
+        time.sleep(1)
 
-    return all_results
+    return all_data
 
 
-# ---------------- TENDER SHEET ---------------- #
+# ---------------- WRITE SHEET ---------------- #
 
-def write_tender_alerts(spreadsheet, data):
-    sheet = get_or_create_worksheet(spreadsheet, "Tender Alerts")
+def write_sheet(sheet, data):
     sheet.clear()
 
     if not data:
@@ -285,7 +226,7 @@ def write_tender_alerts(spreadsheet, data):
         return
 
     headers = list(data[0].keys())
-    rows = [headers] + [[row.get(h, "") for h in headers] for row in data]
+    rows = [headers] + [[r.get(h, "") for h in headers] for r in data]
 
     sheet.update(rows)
 
@@ -293,36 +234,34 @@ def write_tender_alerts(spreadsheet, data):
 # ---------------- MAIN ---------------- #
 
 def main():
-    ensure_playwright_ready()
+    spreadsheet = connect_sheet()
 
-    spreadsheet = connect_spreadsheet()
-
-    # STEP 1: SCRAPE ALPS
-    for url, sheet_name in URL_SHEET_MAP.items():
+    # STEP 1 - SCRAPE
+    for url, name in URL_SHEET_MAP.items():
         print(f"Scraping: {url}")
 
         html = fetch(url)
-        data = extract_events(html, url) if html else []
+        data = extract_events(html, url)
 
-        print(f"{sheet_name}: {len(data)} rows")
+        print(f"{name}: {len(data)} rows")
 
-        sheet = get_or_create_worksheet(spreadsheet, sheet_name)
-        write_to_sheet(sheet, data)
+        sheet = get_sheet(spreadsheet, name)
+        write_sheet(sheet, data)
 
-    # STEP 2: GET RFPs
-    rfp_list = get_rfp_numbers(spreadsheet)
-    print(f"Found RFPs: {len(rfp_list)}")
+    # STEP 2 - RFPs
+    sheet = spreadsheet.worksheet("Pharmaceutical Sourcing Events")
+    rfps = get_rfps(sheet)
 
-    rfp_list = rfp_list[:30]
-    print("RFP SAMPLE:", rfp_list[:5])
+    print(f"Found RFPs: {len(rfps)}")
+    print("Sample:", rfps[:5])
 
-    # STEP 3: ARIBA SEARCH
-    tender_alerts = build_tender_alerts(rfp_list)
+    # STEP 3 - ARIBA
+    alerts = build_alerts(rfps[:20])
 
-    print(f"Total Tender Alerts: {len(tender_alerts)}")
+    print(f"Total Alerts: {len(alerts)}")
 
-    # STEP 4: WRITE RESULTS
-    write_tender_alerts(spreadsheet, tender_alerts)
+    # STEP 4 - WRITE
+    write_sheet(get_sheet(spreadsheet, "Tender Alerts"), alerts)
 
     print("✅ DONE")
 
