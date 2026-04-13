@@ -183,43 +183,71 @@ def build_driver(headless=True):
 
 
 def ariba_login(driver, wait):
-    """Log into Ariba using username/password form."""
+    """Log into Ariba using two-step login (username → Next → password → Login)."""
     print("  → Navigating to Ariba login...")
     driver.get(ARIBA_LOGIN_URL)
-    time.sleep(3)
+    time.sleep(4)
 
-    # Username field — Ariba typically uses 'UserName' or 'user'
+    # --- Step 1: Enter username ---
     try:
         username_field = wait.until(EC.presence_of_element_located(
-            (By.XPATH, "//input[@type='text' or @name='UserName' or @id='UserName' or @placeholder]")
+            (By.XPATH, "//input[@type='text' or @name='UserName' or @id='UserName' or @type='email']")
         ))
         username_field.clear()
         username_field.send_keys(ARIBA_USERNAME)
+        print("  ✓ Username entered")
     except Exception as e:
         print(f"  ✗ Could not find username field: {e}")
         raise
 
-    # Password field
+    # --- Step 2: Click Next button ---
     try:
-        password_field = driver.find_element(By.XPATH, "//input[@type='password']")
+        next_btn = wait.until(EC.element_to_be_clickable(
+            (By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'next')] | //input[@type='submit' and contains(translate(@value,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'next')] | //button[@type='submit']")
+        ))
+        next_btn.click()
+        print("  ✓ Clicked Next")
+    except Exception:
+        # Fallback: press Enter on the username field
+        username_field.send_keys(Keys.RETURN)
+        print("  ✓ Pressed Enter on username")
+
+    # Wait for password field to appear
+    time.sleep(4)
+
+    # --- Step 3: Enter password ---
+    try:
+        password_field = wait.until(EC.presence_of_element_located(
+            (By.XPATH, "//input[@type='password']")
+        ))
         password_field.clear()
         password_field.send_keys(ARIBA_PASSWORD)
+        print("  ✓ Password entered")
     except Exception as e:
         print(f"  ✗ Could not find password field: {e}")
         raise
 
-    # Submit
+    # --- Step 4: Click Login button ---
     try:
-        submit_btn = driver.find_element(
-            By.XPATH,
-            "//button[@type='submit'] | //input[@type='submit'] | //button[contains(text(),'Log') or contains(text(),'Sign')]"
-        )
-        submit_btn.click()
+        login_btn = wait.until(EC.element_to_be_clickable(
+            (By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'log') or contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign')] | //input[@type='submit'] | //button[@type='submit']")
+        ))
+        login_btn.click()
+        print("  ✓ Clicked Login")
     except Exception:
+        # Fallback: press Enter on the password field
         password_field.send_keys(Keys.RETURN)
+        print("  ✓ Pressed Enter on password")
 
-    time.sleep(4)
-    print("  ✓ Login submitted")
+    time.sleep(5)
+    print("  ✓ Login submitted, waiting for dashboard...")
+
+    # Confirm we're past the login page
+    try:
+        wait.until(EC.url_changes(ARIBA_LOGIN_URL))
+        print("  ✓ Successfully logged in")
+    except Exception:
+        print("  ⚠️  URL did not change — login may have failed or is slow. Continuing anyway...")
 
 
 def ariba_search_rfp(driver, wait, rfp_no):
