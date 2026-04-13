@@ -226,138 +226,120 @@ def ariba_login(driver, wait):
     if not next_clicked:
         raise Exception("Could not click Next button")
 
-    # --- Step 3: Wait and diagnose what appeared after Next ---
-    # Give the SPA time to re-render
+    # --- Step 3: Wait for Ariba to load password into the blank iframe ---
+    # Ariba renders the password step inside a src-less iframe after Next is clicked
     time.sleep(5)
     driver.save_screenshot("/tmp/ariba_step2_after_next.png")
     print(f"  📸 Screenshot saved after Next click")
-    print(f"  🌐 URL: {driver.current_url}")
 
-    # Dump full page source for diagnosis
-    page_source = driver.page_source
-    with open("/tmp/ariba_page_after_next.html", "w") as f:
-        f.write(page_source)
-    print("  📄 Full page HTML saved: /tmp/ariba_page_after_next.html")
-
-    # Check for iframes that appeared after Next
-    iframes = driver.find_elements(By.TAG_NAME, "iframe")
-    print(f"  🔍 Iframes found after Next: {len(iframes)}")
-    for i, iframe in enumerate(iframes):
-        src = iframe.get_attribute("src") or ""
-        name = iframe.get_attribute("name") or ""
-        print(f"      iframe[{i}]: src='{src}' name='{name}'")
-
-    # Check for shadow DOM hosts
-    shadow_hosts = driver.find_elements(By.CSS_SELECTOR, "*")
-    shadow_count = 0
-    for el in shadow_hosts[:50]:  # check first 50 elements
-        try:
-            shadow = driver.execute_script("return arguments[0].shadowRoot", el)
-            if shadow:
-                shadow_count += 1
-                print(f"  🔍 Shadow DOM found on: <{el.tag_name} class='{el.get_attribute('class')}'>")
-        except Exception:
-            pass
-    print(f"  🔍 Shadow DOM hosts found: {shadow_count}")
-
-    # Print ALL visible inputs (not just hidden ones)
-    inputs = driver.find_elements(By.TAG_NAME, "input")
-    print(f"  🔍 All inputs after Next ({len(inputs)} total):")
-    for inp in inputs:
-        inp_type = inp.get_attribute('type')
-        inp_name = inp.get_attribute('name')
-        inp_id = inp.get_attribute('id')
-        is_displayed = inp.is_displayed()
-        print(f"      type='{inp_type}' name='{inp_name}' id='{inp_id}' visible={is_displayed}")
-
-    # --- Step 4: Try to find password field in multiple ways ---
     password_field = None
 
-    # Strategy A: Standard visible input
-    try:
-        password_field = WebDriverWait(driver, 10).until(
-            EC.visibility_of_element_located((By.XPATH, "//input[@type='password']"))
-        )
-        print("  ✓ Password found: standard visible input")
-    except Exception:
-        pass
-
-    # Strategy B: Present in DOM but not visible — force-reveal via JS
-    if not password_field:
+    # Strategy A: Switch into the blank iframe and wait for password field
+    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+    print(f"  🔍 Found {len(iframes)} iframe(s) — checking each for password field...")
+    for i, iframe in enumerate(iframes):
         try:
-            hidden_pw = driver.find_element(By.XPATH, "//input[@type='password']")
+            driver.switch_to.default_content()
+            driver.switch_to.frame(iframe)
+
+            # Wait up to 15s for password to render inside the iframe
+            pw = WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='password']"))
+            )
+            # Make sure it's interactable
             driver.execute_script("""
                 arguments[0].style.display = 'block';
                 arguments[0].style.visibility = 'visible';
                 arguments[0].style.opacity = '1';
                 arguments[0].removeAttribute('hidden');
                 arguments[0].removeAttribute('disabled');
-            """, hidden_pw)
-            password_field = hidden_pw
-            print("  ✓ Password found: hidden in DOM, revealed via JS")
-        except Exception:
-            pass
+            """, pw)
+            password_field = pw
+            print(f"  ✓ Password field found inside iframe[{i}]")
 
-    # Strategy C: Check inside iframes
-    if not password_field:
-        driver.switch_to.default_content()
-        for i, iframe in enumerate(iframes):
-            try:
-                driver.switch_to.frame(iframe)
-                pw = driver.find_element(By.XPATH, "//input[@type='password']")
-                password_field = pw
-                print(f"  ✓ Password found in iframe[{i}]")
-                break
-            except Exception:
-                driver.switch_to.default_content()
+            # Debug: dump iframe inputs
+            iframe_inputs = driver.find_elements(By.TAG_NAME, "input")
+            print(f"  🔍 Inputs inside iframe[{i}]:")
+            for inp in iframe_inputs:
+                print(f"      type='{inp.get_attribute('type')}' name='{inp.get_attribute('name')}' id='{inp.get_attribute('id')}' visible={inp.is_displayed()}")
+            break
+        except Exception as ex:
+            print(f"  ⚠️  No password in iframe[{i}]: {ex}")
+            driver.switch_to.default_content()
 
-    # Strategy D: Shadow DOM traversal
+    # Strategy B: Password appeared on main page after delay (fallback)
     if not password_field:
         driver.switch_to.default_content()
         try:
-            pw = driver.execute_script("""
-                function findPasswordInShadow(root) {
-                    if (!root) return null;
-                    var inputs = root.querySelectorAll('input[type="password"]');
-                    if (inputs.length > 0) return inputs[0];
-                    var allEls = root.querySelectorAll('*');
-                    for (var el of allEls) {
-                        if (el.shadowRoot) {
-                            var found = findPasswordInShadow(el.shadowRoot);
-                            if (found) return found;
-                        }
-                    }
-                    return null;
-                }
-                return findPasswordInShadow(document);
-            """)
-            if pw:
-                password_field = pw
-                print("  ✓ Password found via shadow DOM traversal")
+            pw = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='password']"))
+            )
+            driver.execute_script("""
+                arguments[0].style.display = 'block';
+                arguments[0].style.visibility = 'visible';
+                arguments[0].removeAttribute('hidden');
+                arguments[0].removeAttribute('disabled');
+            """, pw)
+            password_field = pw
+            print("  ✓ Password field found on main page (delayed render)")
+        except Exception:
+            pass
+
+    # Strategy C: Check if Ariba redirected to a new URL with password page
+    if not password_field:
+        driver.switch_to.default_content()
+        current_url = driver.current_url
+        print(f"  🌐 Current URL after wait: {current_url}")
+        # Sometimes Ariba does a full redirect for SSO accounts
+        try:
+            pw = driver.find_element(By.XPATH, "//input[@type='password']")
+            password_field = pw
+            print("  ✓ Password field found after redirect")
         except Exception:
             pass
 
     if not password_field:
         driver.save_screenshot("/tmp/ariba_error_no_password.png")
-        raise Exception("Password field never appeared after clicking Next — check /tmp/ariba_page_after_next.html")
+        # Save iframe HTML for debugging
+        for i, iframe in enumerate(driver.find_elements(By.TAG_NAME, "iframe")):
+            try:
+                driver.switch_to.frame(iframe)
+                with open(f"/tmp/ariba_iframe_{i}_content.html", "w") as f:
+                    f.write(driver.page_source)
+                print(f"  📄 iframe[{i}] HTML saved to /tmp/ariba_iframe_{i}_content.html")
+                driver.switch_to.default_content()
+            except Exception:
+                driver.switch_to.default_content()
+        raise Exception("Password field never appeared — check saved iframe HTML files")
 
-    # --- Step 5: Enter password and submit ---
-    driver.execute_script("arguments[0].value = arguments[1];", password_field, ARIBA_PASSWORD)
-    driver.execute_script("arguments[0].dispatchEvent(new Event('input', {bubbles:true}));", password_field)
-    driver.execute_script("arguments[0].dispatchEvent(new Event('change', {bubbles:true}));", password_field)
-    print("  ✓ Password entered via JS value injection")
+    # --- Step 4: Enter password ---
+    try:
+        password_field.clear()
+        password_field.send_keys(ARIBA_PASSWORD)
+        print("  ✓ Password entered via send_keys")
+    except Exception:
+        # Fallback: JS value injection with change event for React/Angular forms
+        driver.execute_script("arguments[0].value = arguments[1];", password_field, ARIBA_PASSWORD)
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', {bubbles:true}));", password_field)
+        driver.execute_script("arguments[0].dispatchEvent(new Event('change', {bubbles:true}));", password_field)
+        print("  ✓ Password entered via JS injection")
 
-    # Click login button
+    driver.save_screenshot("/tmp/ariba_step2b_password_entered.png")
+    print("  📸 Screenshot saved after password entry")
+
+    # --- Step 5: Click Login button (we may still be inside the iframe) ---
     login_clicked = False
     login_selectors = [
-        (By.XPATH, "//input[@type='submit' and (contains(@value,'Log') or contains(@value,'Sign') or contains(@value,'login'))]"),
-        (By.XPATH, "//button[contains(normalize-space(text()),'Log') or contains(normalize-space(text()),'Sign')]"),
+        (By.XPATH, "//input[@type='submit' and (contains(translate(@value,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'log') or contains(translate(@value,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign'))]"),
+        (By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'log') or contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign')]"),
         (By.XPATH, "//input[@type='submit']"),
         (By.XPATH, "//button[@type='submit']"),
+        (By.XPATH, "//*[normalize-space(text())='Login' or normalize-space(text())='Sign In' or normalize-space(text())='Log In']"),
     ]
     for by, selector in login_selectors:
         try:
-            btn = wait.until(EC.element_to_be_clickable((by, selector)))
+            btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((by, selector)))
+            driver.execute_script("arguments[0].scrollIntoView(true);", btn)
             driver.execute_script("arguments[0].click();", btn)
             login_clicked = True
             print(f"  ✓ Clicked Login ({selector})")
@@ -370,12 +352,14 @@ def ariba_login(driver, wait):
             password_field.send_keys(Keys.RETURN)
             print("  ✓ Pressed Enter on password (fallback)")
         except Exception:
+            driver.switch_to.default_content()
             driver.execute_script("document.querySelector('form').submit();")
             print("  ✓ Form submitted via JS (fallback)")
 
     time.sleep(8)
+    driver.switch_to.default_content()
     driver.save_screenshot("/tmp/ariba_step3_after_login.png")
-    print(f"  📸 Screenshot saved after login")
+    print(f"  📸 Screenshot saved after login attempt")
     print(f"  📄 Page title: {driver.title}")
     print(f"  🌐 Current URL: {driver.current_url}")
     print("  ✓ Login flow complete")
