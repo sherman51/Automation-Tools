@@ -1,17 +1,16 @@
-name: Daily ALPS Sourcing Scraper
+name: ALPS 5-Min Scraper
 
 on:
   schedule:
-    - cron: "0 2 * * *"  # runs daily at 2 AM UTC
-  workflow_dispatch:     # allows manual run button
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -24,8 +23,8 @@ jobs:
       - name: Run scraper
         run: python main.py
 
-      - name: Upload results
+      - name: Upload result
         uses: actions/upload-artifact@v4
         with:
-          name: alps-sourcing-events
+          name: alps-data
           path: alps_sourcing_events.json
