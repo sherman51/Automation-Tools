@@ -11,6 +11,7 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
@@ -22,7 +23,7 @@ URL_SHEET_MAP = {
 }
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "User-Agent": "Mozilla/5.0",
     "Accept-Language": "en-US,en;q=0.9"
 }
 
@@ -35,8 +36,6 @@ SPREADSHEET_ID = "1ZGf468X845aw8pJ4hmdyYHsV7JrrHhZsCxq4mXLrRdg"
 
 ARIBA_LOGIN_URL = "https://service.ariba.com/Authenticator.aw/ad/ssoIDP"
 
-# Set your Ariba credentials via environment variables:
-#   ARIBA_USERNAME and ARIBA_PASSWORD
 ARIBA_USERNAME = os.getenv("ARIBA_USERNAME", "")
 ARIBA_PASSWORD = os.getenv("ARIBA_PASSWORD", "")
 
@@ -47,10 +46,9 @@ TENDER_ALERTS_SHEET = "Tender Alerts"
 def get_google_creds():
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if not creds_json:
-        raise Exception("Missing GOOGLE_CREDENTIALS_JSON environment variable")
+        raise Exception("Missing GOOGLE_CREDENTIALS_JSON")
     creds_dict = json.loads(creds_json)
-    credentials = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    return credentials
+    return Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
 
 # ---------------- SCRAPER ---------------- #
 
@@ -63,16 +61,15 @@ def fetch(url):
         print(f"Error fetching {url}: {e}")
         return ""
 
-
 def extract_events(html, url):
     soup = BeautifulSoup(html, "html.parser")
     results = []
     current_month = None
 
-    for tag in soup.find_all(["h1", "h2", "h3", "h4", "table"]):
-        if tag.name in ["h1", "h2", "h3", "h4"]:
+    for tag in soup.find_all(["h1","h2","h3","h4","table"]):
+        if tag.name.startswith("h"):
             text = tag.get_text(strip=True)
-            if any(month in text.lower() for month in [
+            if any(m in text.lower() for m in [
                 "january","february","march","april","may","june",
                 "july","august","september","october","november","december"
             ]):
@@ -80,18 +77,15 @@ def extract_events(html, url):
 
         elif tag.name == "table":
             rows = tag.find_all("tr")
-            if not rows:
-                continue
-
             headers = [h.get_text(strip=True) for h in tag.find_all("th")]
-            if not headers:
-                first_row_cols = rows[0].find_all(["td", "th"])
-                headers = [c.get_text(strip=True) for c in first_row_cols]
+
+            if not headers and rows:
+                headers = [c.get_text(strip=True) for c in rows[0].find_all(["td","th"])]
                 rows = rows[1:]
 
             for tr in rows:
                 cols = [td.get_text(strip=True) for td in tr.find_all("td")]
-                if not cols or cols == headers:
+                if not cols:
                     continue
 
                 row = {"source_url": url}
@@ -103,36 +97,18 @@ def extract_events(html, url):
 
                 results.append(row)
 
-    if not results:
-        for item in soup.find_all("li"):
-            text = item.get_text(" ", strip=True)
-            if len(text) > 20:
-                results.append({"source_url": url, "content": text})
-
     return results
 
-
 def extract_rfp_numbers(data):
-    """
-    Extract all RFP numbers from scraped rows.
-    Looks in dedicated 'RFP No.' columns AND scans all text fields
-    for patterns like RFP-XXXX or RFPXXXXXXX.
-    """
     rfp_set = set()
-    rfp_pattern = re.compile(r'\bRFP[-\s]?\w+\b', re.IGNORECASE)
+
+    # ✅ FIXED: supports GPOR
+    pattern = re.compile(r'\b(?:RFP|GPOR)[-\s]?\w+\b', re.IGNORECASE)
 
     for row in data:
-        # Check dedicated column first
-        for key in row:
-            if "rfp" in key.lower() and "no" in key.lower():
-                val = row[key].strip()
-                if val:
-                    rfp_set.add(val)
-
-        # Also scan all values for embedded RFP numbers
         for val in row.values():
             if isinstance(val, str):
-                matches = rfp_pattern.findall(val)
+                matches = pattern.findall(val)
                 for m in matches:
                     rfp_set.add(m.strip())
 
@@ -141,454 +117,148 @@ def extract_rfp_numbers(data):
 # ---------------- GOOGLE SHEETS ---------------- #
 
 def connect_spreadsheet():
-    creds = get_google_creds()
-    client = gspread.authorize(creds)
+    client = gspread.authorize(get_google_creds())
     return client.open_by_key(SPREADSHEET_ID)
 
-
-def get_or_create_worksheet(spreadsheet, sheet_name):
+def get_or_create_worksheet(spreadsheet, name):
     try:
-        worksheet = spreadsheet.worksheet(sheet_name)
-    except gspread.exceptions.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols="20")
-    return worksheet
-
+        return spreadsheet.worksheet(name)
+    except:
+        return spreadsheet.add_worksheet(title=name, rows="1000", cols="20")
 
 def write_to_sheet(sheet, data):
     sheet.clear()
     if not data:
-        print("No data found")
         return
     headers = list(data[0].keys())
-    rows = [headers] + [[row.get(h, "") for h in headers] for row in data]
+    rows = [headers] + [[row.get(h,"") for h in headers] for row in data]
     sheet.update(rows)
 
-# ---------------- ARIBA SELENIUM ---------------- #
+# ---------------- SELENIUM ---------------- #
 
 def build_driver(headless=True):
-    """Create a Chrome WebDriver. Set headless=False to watch it run."""
     options = Options()
+
     if headless:
         options.add_argument("--headless=new")
+
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
     driver = webdriver.Chrome(options=options)
+
+    driver.execute_script(
+        "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+    )
+
     return driver
 
+# ---------------- LOGIN ---------------- #
 
 def ariba_login(driver, wait):
-    print("  → Navigating to Ariba login...")
     driver.get(ARIBA_LOGIN_URL)
     time.sleep(5)
 
-    driver.save_screenshot("/tmp/ariba_step1_login_page.png")
-    print(f"  📄 Page title: {driver.title}")
-    print(f"  🌐 Current URL: {driver.current_url}")
+    username = wait.until(EC.presence_of_element_located((By.NAME, "userid")))
+    username.send_keys(ARIBA_USERNAME)
 
-    # --- Step 1: Enter username ---
+    # 🔥 ROBUST NEXT CLICK
+    next_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[contains(.,'Next')] | //input[@value='Next']")))
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", next_btn)
+    time.sleep(1)
+
     try:
-        username_field = wait.until(EC.presence_of_element_located((By.NAME, "userid")))
-        print("  ✓ Username field found")
-    except Exception as e:
-        driver.save_screenshot("/tmp/ariba_error_no_username.png")
-        raise Exception(f"Could not find username field: {e}")
+        next_btn.click()
+    except:
+        ActionChains(driver).move_to_element(next_btn).click().perform()
 
-    username_field.clear()
-    username_field.send_keys(ARIBA_USERNAME)
-    print("  ✓ Username entered")
+    print("✓ Clicked Next")
 
-    # --- Step 2: Click Next ---
-    next_clicked = False
-    next_selectors = [
-        (By.XPATH, "//input[@type='submit' and @value='Next']"),
-        (By.XPATH, "//button[normalize-space(text())='Next']"),
-        (By.XPATH, "//input[@type='submit']"),
-        (By.XPATH, "//button[@type='submit']"),
-        (By.XPATH, "//*[normalize-space(text())='Next']"),
-    ]
-    for by, selector in next_selectors:
-        try:
-            btn = wait.until(EC.element_to_be_clickable((by, selector)))
-            driver.execute_script("arguments[0].scrollIntoView(true);", btn)
-            driver.execute_script("arguments[0].click();", btn)
-            next_clicked = True
-            print(f"  ✓ Clicked Next ({selector})")
-            break
-        except Exception:
-            continue
+    # ✅ WAIT for password
+    wait.until(lambda d: len(d.find_elements(By.XPATH, "//input[@type='password']")) > 0)
 
-    if not next_clicked:
-        raise Exception("Could not click Next button")
+    password = driver.find_element(By.XPATH, "//input[@type='password']")
+    password.send_keys(ARIBA_PASSWORD)
 
-    # --- Step 3: Wait for Ariba to load password into the blank iframe ---
-    # Ariba renders the password step inside a src-less iframe after Next is clicked
+    print("✓ Password entered")
+
+    password.send_keys(Keys.RETURN)
     time.sleep(5)
-    driver.save_screenshot("/tmp/ariba_step2_after_next.png")
-    print(f"  📸 Screenshot saved after Next click")
 
-    password_field = None
+    print("✓ Login done")
 
-    # Strategy A: Switch into the blank iframe and wait for password field
-    iframes = driver.find_elements(By.TAG_NAME, "iframe")
-    print(f"  🔍 Found {len(iframes)} iframe(s) — checking each for password field...")
-    for i, iframe in enumerate(iframes):
-        try:
-            driver.switch_to.default_content()
-            driver.switch_to.frame(iframe)
-
-            # Wait up to 15s for password to render inside the iframe
-            pw = WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.XPATH, "//input[@type='password']"))
-            )
-            # Make sure it's interactable
-            driver.execute_script("""
-                arguments[0].style.display = 'block';
-                arguments[0].style.visibility = 'visible';
-                arguments[0].style.opacity = '1';
-                arguments[0].removeAttribute('hidden');
-                arguments[0].removeAttribute('disabled');
-            """, pw)
-            password_field = pw
-            print(f"  ✓ Password field found inside iframe[{i}]")
-
-            # Debug: dump iframe inputs
-            iframe_inputs = driver.find_elements(By.TAG_NAME, "input")
-            print(f"  🔍 Inputs inside iframe[{i}]:")
-            for inp in iframe_inputs:
-                print(f"      type='{inp.get_attribute('type')}' name='{inp.get_attribute('name')}' id='{inp.get_attribute('id')}' visible={inp.is_displayed()}")
-            break
-        except Exception as ex:
-            print(f"  ⚠️  No password in iframe[{i}]: {ex}")
-            driver.switch_to.default_content()
-
-    # Strategy B: Password appeared on main page after delay (fallback)
-    if not password_field:
-        driver.switch_to.default_content()
-        try:
-            pw = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, "//input[@type='password']"))
-            )
-            driver.execute_script("""
-                arguments[0].style.display = 'block';
-                arguments[0].style.visibility = 'visible';
-                arguments[0].removeAttribute('hidden');
-                arguments[0].removeAttribute('disabled');
-            """, pw)
-            password_field = pw
-            print("  ✓ Password field found on main page (delayed render)")
-        except Exception:
-            pass
-
-    # Strategy C: Check if Ariba redirected to a new URL with password page
-    if not password_field:
-        driver.switch_to.default_content()
-        current_url = driver.current_url
-        print(f"  🌐 Current URL after wait: {current_url}")
-        # Sometimes Ariba does a full redirect for SSO accounts
-        try:
-            pw = driver.find_element(By.XPATH, "//input[@type='password']")
-            password_field = pw
-            print("  ✓ Password field found after redirect")
-        except Exception:
-            pass
-
-    if not password_field:
-        driver.save_screenshot("/tmp/ariba_error_no_password.png")
-        # Save iframe HTML for debugging
-        for i, iframe in enumerate(driver.find_elements(By.TAG_NAME, "iframe")):
-            try:
-                driver.switch_to.frame(iframe)
-                with open(f"/tmp/ariba_iframe_{i}_content.html", "w") as f:
-                    f.write(driver.page_source)
-                print(f"  📄 iframe[{i}] HTML saved to /tmp/ariba_iframe_{i}_content.html")
-                driver.switch_to.default_content()
-            except Exception:
-                driver.switch_to.default_content()
-        raise Exception("Password field never appeared — check saved iframe HTML files")
-
-    # --- Step 4: Enter password ---
-    try:
-        password_field.clear()
-        password_field.send_keys(ARIBA_PASSWORD)
-        print("  ✓ Password entered via send_keys")
-    except Exception:
-        # Fallback: JS value injection with change event for React/Angular forms
-        driver.execute_script("arguments[0].value = arguments[1];", password_field, ARIBA_PASSWORD)
-        driver.execute_script("arguments[0].dispatchEvent(new Event('input', {bubbles:true}));", password_field)
-        driver.execute_script("arguments[0].dispatchEvent(new Event('change', {bubbles:true}));", password_field)
-        print("  ✓ Password entered via JS injection")
-
-    driver.save_screenshot("/tmp/ariba_step2b_password_entered.png")
-    print("  📸 Screenshot saved after password entry")
-
-    # --- Step 5: Click Login button (we may still be inside the iframe) ---
-    login_clicked = False
-    login_selectors = [
-        (By.XPATH, "//input[@type='submit' and (contains(translate(@value,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'log') or contains(translate(@value,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign'))]"),
-        (By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'log') or contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign')]"),
-        (By.XPATH, "//input[@type='submit']"),
-        (By.XPATH, "//button[@type='submit']"),
-        (By.XPATH, "//*[normalize-space(text())='Login' or normalize-space(text())='Sign In' or normalize-space(text())='Log In']"),
-    ]
-    for by, selector in login_selectors:
-        try:
-            btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((by, selector)))
-            driver.execute_script("arguments[0].scrollIntoView(true);", btn)
-            driver.execute_script("arguments[0].click();", btn)
-            login_clicked = True
-            print(f"  ✓ Clicked Login ({selector})")
-            break
-        except Exception:
-            continue
-
-    if not login_clicked:
-        try:
-            password_field.send_keys(Keys.RETURN)
-            print("  ✓ Pressed Enter on password (fallback)")
-        except Exception:
-            driver.switch_to.default_content()
-            driver.execute_script("document.querySelector('form').submit();")
-            print("  ✓ Form submitted via JS (fallback)")
-
-    time.sleep(8)
-    driver.switch_to.default_content()
-    driver.save_screenshot("/tmp/ariba_step3_after_login.png")
-    print(f"  📸 Screenshot saved after login attempt")
-    print(f"  📄 Page title: {driver.title}")
-    print(f"  🌐 Current URL: {driver.current_url}")
-    print("  ✓ Login flow complete")
-
+# ---------------- SEARCH ---------------- #
 
 def ariba_search_rfp(driver, wait, rfp_no):
-    """
-    Search for an RFP number on Ariba and return extracted fields.
-    Returns a dict with all available fields, or None if not found.
-    """
-    print(f"  → Searching for: {rfp_no}")
+    print(f"Searching {rfp_no}")
 
-    # Try direct search via URL parameter first
-    search_url = f"https://service.ariba.com/Discovery.aw/ad/rfxList?rfxId={rfp_no}"
-    driver.get(search_url)
+    url = f"https://service.ariba.com/Discovery.aw/ad/rfxList?rfxId={rfp_no}"
+    driver.get(url)
     time.sleep(3)
 
-    # If that doesn't work, use the search box
-    try:
-        search_box = driver.find_elements(
-            By.XPATH,
-            "//input[@type='search' or @placeholder or @name='searchTerms' or contains(@id,'search')]"
-        )
-        if search_box:
-            search_box[0].clear()
-            search_box[0].send_keys(rfp_no)
-            search_box[0].send_keys(Keys.RETURN)
-            time.sleep(3)
-    except Exception:
-        pass
+    return parse_ariba(driver, rfp_no)
 
-    # Parse whatever page we landed on
-    return parse_ariba_rfp_page(driver, rfp_no)
-
-
-def parse_ariba_rfp_page(driver, rfp_no):
-    """
-    Extract RFI ID, Lead Title, Respond By Date and any other visible fields
-    from the current Ariba page.
-    """
-    result = {
-        "RFP No.": rfp_no,
-        "RFI ID": "",
-        "Lead Title": "",
-        "Respond By Date": "",
-        "Buyer": "",
-        "Category": "",
-        "Region": "",
-        "Posted Date": "",
-        "Description": "",
-        "Ariba URL": driver.current_url,
-    }
-
+def parse_ariba(driver, rfp):
     soup = BeautifulSoup(driver.page_source, "html.parser")
 
-    # --- Strategy 1: Look for labelled field pairs (label + value) ---
-    label_map = {
-        "rfi id":         "RFI ID",
-        "rfp id":         "RFI ID",
-        "event id":       "RFI ID",
-        "title":          "Lead Title",
-        "event title":    "Lead Title",
-        "lead title":     "Lead Title",
-        "respond by":     "Respond By Date",
-        "response due":   "Respond By Date",
-        "close date":     "Respond By Date",
-        "deadline":       "Respond By Date",
-        "buyer":          "Buyer",
-        "organization":   "Buyer",
-        "category":       "Category",
-        "commodity":      "Category",
-        "region":         "Region",
-        "location":       "Region",
-        "posted":         "Posted Date",
-        "publish date":   "Posted Date",
-        "description":    "Description",
+    result = {
+        "RFP No.": rfp,
+        "Lead Title": "",
+        "Respond By Date": "",
+        "Ariba URL": driver.current_url
     }
 
-    # Search <th>/<td> pairs in tables
-    for table in soup.find_all("table"):
-        for row in table.find_all("tr"):
-            cells = row.find_all(["th", "td"])
-            if len(cells) >= 2:
-                label = cells[0].get_text(strip=True).lower().rstrip(":")
-                value = cells[1].get_text(strip=True)
-                for key, field in label_map.items():
-                    if key in label and value:
-                        result[field] = value
-
-    # Search <label> + sibling/following elements
-    for label_tag in soup.find_all(["label", "dt", "span", "div"]):
-        label_text = label_tag.get_text(strip=True).lower().rstrip(":")
-        for key, field in label_map.items():
-            if key in label_text:
-                # Try next sibling
-                sibling = label_tag.find_next_sibling()
-                if sibling:
-                    val = sibling.get_text(strip=True)
-                    if val and not result[field]:
-                        result[field] = val
-
-    # --- Strategy 2: Try clicking into the first result row if on a list page ---
-    if not result["RFI ID"] and not result["Lead Title"]:
-        try:
-            first_link = driver.find_element(
-                By.XPATH,
-                "//table//tr[2]//a | //div[contains(@class,'result')]//a | //td//a[contains(@href,'rfx') or contains(@href,'RFP')]"
-            )
-            first_link.click()
-            time.sleep(3)
-            # Re-parse the detail page
-            soup2 = BeautifulSoup(driver.page_source, "html.parser")
-            result["Ariba URL"] = driver.current_url
-
-            for table in soup2.find_all("table"):
-                for row in table.find_all("tr"):
-                    cells = row.find_all(["th", "td"])
-                    if len(cells) >= 2:
-                        label = cells[0].get_text(strip=True).lower().rstrip(":")
-                        value = cells[1].get_text(strip=True)
-                        for key, field in label_map.items():
-                            if key in label and value:
-                                result[field] = value
-        except Exception:
-            pass
-
-    # If still empty, at minimum store the page title as Lead Title
-    if not result["Lead Title"]:
-        title_tag = soup.find("title")
-        if title_tag:
-            result["Lead Title"] = title_tag.get_text(strip=True)
-
-    found = any(result[f] for f in ["RFI ID", "Lead Title", "Respond By Date"])
-    status = "✓ Found" if found else "✗ Not found"
-    print(f"    {status}: {result['Lead Title'] or '(no title)'}")
+    title = soup.find("title")
+    if title:
+        result["Lead Title"] = title.text.strip()
 
     return result
 
+# ---------------- MAIN ---------------- #
 
-def run_ariba_search(rfp_numbers):
-    """
-    Log into Ariba once, then search each RFP number.
-    Returns list of result dicts.
-    """
-    if not rfp_numbers:
-        print("No RFP numbers to search.")
-        return []
-
-    if not ARIBA_USERNAME or not ARIBA_PASSWORD:
-        raise Exception(
-            "Missing ARIBA_USERNAME or ARIBA_PASSWORD environment variables. "
-            "Please set them before running."
-        )
-
-    print(f"\n🔍 Searching {len(rfp_numbers)} RFP number(s) on Ariba...")
-
+def run_ariba_search(rfps):
     driver = build_driver(headless=True)
     wait = WebDriverWait(driver, 20)
+
     results = []
 
     try:
         ariba_login(driver, wait)
 
-        for rfp_no in rfp_numbers:
-            try:
-                record = ariba_search_rfp(driver, wait, rfp_no)
-                results.append(record)
-                time.sleep(2)  # Be polite to the server
-            except Exception as e:
-                print(f"  ✗ Error searching {rfp_no}: {e}")
-                results.append({
-                    "RFP No.": rfp_no,
-                    "RFI ID": "",
-                    "Lead Title": f"ERROR: {e}",
-                    "Respond By Date": "",
-                    "Buyer": "",
-                    "Category": "",
-                    "Region": "",
-                    "Posted Date": "",
-                    "Description": "",
-                    "Ariba URL": "",
-                })
+        for r in rfps:
+            results.append(ariba_search_rfp(driver, wait, r))
 
     finally:
         driver.quit()
 
     return results
 
-# ---------------- MAIN ---------------- #
-
 def main():
-    spreadsheet = connect_spreadsheet()
+    sheet = connect_spreadsheet()
+
     pharma_data = []
 
-    # Step 1 — Scrape ALPS Healthcare pages
-    for url, sheet_name in URL_SHEET_MAP.items():
-        print(f"Scraping: {url}")
+    for url, name in URL_SHEET_MAP.items():
         html = fetch(url)
-        data = []
+        data = extract_events(html, url)
 
-        if html:
-            data = extract_events(html, url)
+        write_to_sheet(get_or_create_worksheet(sheet, name), data)
 
-        print(f"  {sheet_name}: {len(data)} rows")
-
-        worksheet = get_or_create_worksheet(spreadsheet, sheet_name)
-        write_to_sheet(worksheet, data)
-
-        # Collect pharma rows for Ariba search
-        if "pharmaceutical" in sheet_name.lower():
+        if "pharmaceutical" in name.lower():
             pharma_data = data
 
-    print("✅ ALPS Healthcare sheets updated")
+    rfps = extract_rfp_numbers(pharma_data)
+    print("RFPs:", rfps)
 
-    # Step 2 — Extract RFP numbers from pharmaceutical sheet
-    rfp_numbers = extract_rfp_numbers(pharma_data)
-    print(f"\n📋 Found {len(rfp_numbers)} RFP number(s): {rfp_numbers}")
+    tender_data = run_ariba_search(rfps)
 
-    # Step 3 — Search each RFP on Ariba
-    tender_data = run_ariba_search(rfp_numbers)
-
-    # Step 4 — Write results to Tender Alerts sheet
-    if tender_data:
-        tender_sheet = get_or_create_worksheet(spreadsheet, TENDER_ALERTS_SHEET)
-        write_to_sheet(tender_sheet, tender_data)
-        print(f"\n✅ Tender Alerts sheet updated with {len(tender_data)} record(s)")
-    else:
-        print("\n⚠️  No Ariba results to write")
-
+    write_to_sheet(
+        get_or_create_worksheet(sheet, TENDER_ALERTS_SHEET),
+        tender_data
+    )
 
 if __name__ == "__main__":
     main()
