@@ -57,30 +57,42 @@ def extract_events(html, url):
     soup = BeautifulSoup(html, "html.parser")
     results = []
 
-    # 1. Try table-based extraction
     tables = soup.find_all("table")
 
     for table in tables:
+        rows = table.find_all("tr")
+
+        if not rows:
+            continue
+
+        # Try to get headers from <th>
         headers = [h.get_text(strip=True) for h in table.find_all("th")]
 
-        for tr in table.find_all("tr"):
+        # ✅ If no <th>, use first row as header
+        if not headers:
+            first_row_cols = rows[0].find_all(["td", "th"])
+            headers = [c.get_text(strip=True) for c in first_row_cols]
+            rows = rows[1:]  # skip header row
+
+        for tr in rows:
             cols = [td.get_text(strip=True) for td in tr.find_all("td")]
 
             if not cols:
                 continue
 
+            # ✅ Skip repeated header rows inside table
+            if cols == headers:
+                continue
+
             row = {"source_url": url}
 
-            if headers and len(headers) == len(cols):
-                for i in range(len(headers)):
-                    row[headers[i]] = cols[i]
-            else:
-                for i, col in enumerate(cols):
-                    row[f"column_{i+1}"] = col
+            # Map columns safely
+            for i in range(min(len(headers), len(cols))):
+                row[headers[i]] = cols[i]
 
             results.append(row)
 
-    # 2. Fallback: list items
+    # Fallback if no tables found
     if not results:
         items = soup.find_all("li")
 
