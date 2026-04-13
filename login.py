@@ -7,7 +7,7 @@ def main():
 
         context = p.chromium.launch_persistent_context(
             user_data_dir="ariba_profile",
-            headless=False
+            headless=True
         )
 
         page = context.new_page()
