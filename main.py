@@ -12,20 +12,6 @@ URL_SHEET_MAP = {
     "https://www.alpshealthcare.com.sg/strategic-procurement/pharmaceutical-sourcing-events/": "Pharmaceutical Sourcing Events",
 }
 
-PHARMA_HEADERS = [
-    "RFP No.",
-    "Event Description",
-    "Respond to posting",
-    "Published Date",
-    "Closing Date/ Time",
-    "Contract Period",
-    "Contract Quantity",
-    "Buffer Quantity",
-    "Financial Category",
-    "Corrigendum",
-    "Remarks"
-]
-
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     "Accept-Language": "en-US,en;q=0.9"
@@ -71,7 +57,7 @@ def extract_events(html, url):
     soup = BeautifulSoup(html, "html.parser")
     results = []
 
-    # 1. Table extraction
+    # 1. Try table-based extraction
     tables = soup.find_all("table")
 
     for table in tables:
@@ -94,7 +80,7 @@ def extract_events(html, url):
 
             results.append(row)
 
-    # 2. Fallback (list items)
+    # 2. Fallback: list items
     if not results:
         items = soup.find_all("li")
 
@@ -129,23 +115,18 @@ def get_or_create_worksheet(spreadsheet, sheet_name):
     return worksheet
 
 
-def write_to_sheet(sheet, data, headers=None):
+def write_to_sheet(sheet, data):
     sheet.clear()
 
     if not data:
         print("No data found")
         return
 
-    # Use custom headers if provided
-    if headers:
-        final_headers = headers
-    else:
-        final_headers = list(data[0].keys())
-
-    rows = [final_headers]
-
-    for row in data:
-        rows.append([row.get(h, "") for h in final_headers])
+    headers = list(data[0].keys())
+    rows = [headers] + [
+        [row.get(h, "") for h in headers]
+        for row in data
+    ]
 
     sheet.update(rows)
 
@@ -166,19 +147,7 @@ def main():
         print(f"{sheet_name}: {len(data)} rows")
 
         worksheet = get_or_create_worksheet(spreadsheet, sheet_name)
-
-        # Apply fixed headers only for Pharmaceutical Sourcing Events
-        if sheet_name == "Pharmaceutical Sourcing Events":
-            write_to_sheet(
-                worksheet,
-                data,
-                headers=PHARMA_HEADERS
-            )
-        else:
-            write_to_sheet(
-                worksheet,
-                data
-            )
+        write_to_sheet(worksheet, data)
 
     print("✅ Google Sheets updated successfully")
 
