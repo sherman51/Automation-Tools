@@ -3,9 +3,7 @@ from bs4 import BeautifulSoup
 import gspread
 import json
 import os
-import time
 from google.oauth2.service_account import Credentials
-from playwright.sync_api import sync_playwright
 
 # ---------------- CONFIG ---------------- #
 
@@ -15,88 +13,95 @@ URL_SHEET_MAP = {
 }
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Accept-Language": "en-US,en;q=0.9"
 }
-
-SPREADSHEET_ID = "1ZGf468X845aw8pJ4hmdyYHsV7JrrHhZsCxq4mXLrRdg"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
-ARIBA_URL = "https://service.ariba.com/Sourcing.aw/"
-SESSION_FILE = "ariba_state.json"
+SPREADSHEET_ID = "1ZGf468X845aw8pJ4hmdyYHsV7JrrHhZsCxq4mXLrRdg"
 
+# ---------------- GOOGLE AUTH ---------------- #
 
-# ---------------- GOOGLE SHEETS ---------------- #
-
-def get_creds():
+def get_google_creds():
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+
     if not creds_json:
-        raise Exception("Missing GOOGLE_CREDENTIALS_JSON")
+        raise Exception("Missing GOOGLE_CREDENTIALS_JSON environment variable")
 
     creds_dict = json.loads(creds_json)
 
-    return Credentials.from_service_account_info(
+    credentials = Credentials.from_service_account_info(
         creds_dict,
         scopes=SCOPES
     )
 
-
-def connect_sheet():
-    client = gspread.authorize(get_creds())
-    return client.open_by_key(SPREADSHEET_ID)
-
-
-def get_sheet(spreadsheet, name):
-    try:
-        return spreadsheet.worksheet(name)
-    except:
-        return spreadsheet.add_worksheet(title=name, rows="1000", cols="20")
-
+    return credentials
 
 # ---------------- SCRAPER ---------------- #
 
 def fetch(url):
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    return r.text
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=30)
+        res.raise_for_status()
+        return res.text
+    except Exception as e:
+        print(f"Error fetching {url}: {e}")
+        return ""
 
 
 def extract_events(html, url):
     soup = BeautifulSoup(html, "html.parser")
     results = []
+
     current_month = None
 
+    # Walk through page in order
     for tag in soup.find_all(["h1", "h2", "h3", "h4", "table"]):
 
+        # ✅ Capture month headers
         if tag.name in ["h1", "h2", "h3", "h4"]:
             text = tag.get_text(strip=True)
 
-            if any(m in text.lower() for m in [
+            # Basic check for month/year text
+            if any(month in text.lower() for month in [
                 "january","february","march","april","may","june",
                 "july","august","september","october","november","december"
             ]):
                 current_month = text
 
+        # ✅ Process table under that month
         elif tag.name == "table":
-            rows = tag.find_all("tr")
+            table = tag
+            rows = table.find_all("tr")
+
             if not rows:
                 continue
 
-            headers = [h.get_text(strip=True) for h in tag.find_all("th")]
+            headers = [h.get_text(strip=True) for h in table.find_all("th")]
 
+            # Fallback header logic
             if not headers:
-                headers = [c.get_text(strip=True) for c in rows[0].find_all("td")]
+                first_row_cols = rows[0].find_all(["td", "th"])
+                headers = [c.get_text(strip=True) for c in first_row_cols]
                 rows = rows[1:]
 
-            for r in rows:
-                cols = [c.get_text(strip=True) for c in r.find_all("td")]
+            for tr in rows:
+                cols = [td.get_text(strip=True) for td in tr.find_all("td")]
+
                 if not cols:
                     continue
 
-                row = {"source_url": url}
+                if cols == headers:
+                    continue
+
+                row = {
+                    "source_url": url
+                }
+                
                 if current_month:
                     row["PERIOD"] = current_month
 
@@ -105,165 +110,76 @@ def extract_events(html, url):
 
                 results.append(row)
 
-    return results
+    # Fallback (unchanged)
+    if not results:
+        items = soup.find_all("li")
 
+        for item in items:
+            text = item.get_text(" ", strip=True)
 
-# ---------------- RFP EXTRACTION ---------------- #
-
-def get_rfps(sheet):
-    data = sheet.get_all_records()
-    rfps = []
-
-    for r in data:
-        val = r.get("RFP No.")
-        if val:
-            rfps.append(str(val).strip())
-
-    return list(set(rfps))
-
-
-# ---------------- ARIBA SESSION ---------------- #
-
-def ensure_session():
-    if not os.path.exists(SESSION_FILE):
-        print("⚠️ No session found. Run login once.")
-        return False
-    return True
-
-
-def init_session():
-    print("👉 Opening browser for login...")
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context()
-        page = context.new_page()
-
-        page.goto(ARIBA_URL)
-
-        print("🔐 Please login manually...")
-        page.wait_for_timeout(180000)
-
-        context.storage_state(path=SESSION_FILE)
-
-        print("✅ Session saved")
-        browser.close()
-
-
-# ---------------- ARIBA SEARCH ---------------- #
-
-def search_ariba(rfp):
-    if not ensure_session():
-        return []
-
-    results = []
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
-        )
-
-        context = browser.new_context(storage_state=SESSION_FILE)
-        page = context.new_page()
-
-        page.goto(ARIBA_URL)
-        page.wait_for_timeout(4000)
-
-        try:
-            page.fill("input[type='search']", rfp)
-            page.keyboard.press("Enter")
-        except:
-            browser.close()
-            return []
-
-        page.wait_for_timeout(5000)
-
-        items = page.query_selector_all(".search-result-item")
-
-        for i in items:
-            try:
-                title = i.query_selector(".title")
-                link = i.query_selector("a")
-
+            if len(text) > 20:
                 results.append({
-                    "RFP No": rfp,
-                    "title": title.inner_text() if title else "",
-                    "link": link.get_attribute("href") if link else ""
+                    "source_url": url,
+                    "content": text
                 })
-            except:
-                continue
-
-        browser.close()
 
     return results
 
+# ---------------- GOOGLE SHEETS ---------------- #
 
-def build_alerts(rfps):
-    all_data = []
-
-    for r in rfps:
-        print(f"Searching Ariba: {r}")
-        try:
-            res = search_ariba(r)
-            print(f"Found {len(res)} results")
-            all_data.extend(res)
-        except Exception as e:
-            print(f"Error {r}: {e}")
-
-        time.sleep(1)
-
-    return all_data
+def connect_spreadsheet():
+    creds = get_google_creds()
+    client = gspread.authorize(creds)
+    return client.open_by_key(SPREADSHEET_ID)
 
 
-# ---------------- WRITE SHEET ---------------- #
+def get_or_create_worksheet(spreadsheet, sheet_name):
+    try:
+        worksheet = spreadsheet.worksheet(sheet_name)
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(
+            title=sheet_name,
+            rows="1000",
+            cols="20"
+        )
+    return worksheet
 
-def write_sheet(sheet, data):
+
+def write_to_sheet(sheet, data):
     sheet.clear()
 
     if not data:
-        print("⚠️ No Tender Alerts found")
+        print("No data found")
         return
 
     headers = list(data[0].keys())
-    rows = [headers] + [[r.get(h, "") for h in headers] for r in data]
+    rows = [headers] + [
+        [row.get(h, "") for h in headers]
+        for row in data
+    ]
 
     sheet.update(rows)
-
 
 # ---------------- MAIN ---------------- #
 
 def main():
-    spreadsheet = connect_sheet()
+    spreadsheet = connect_spreadsheet()
 
-    # STEP 1 - SCRAPE
-    for url, name in URL_SHEET_MAP.items():
+    for url, sheet_name in URL_SHEET_MAP.items():
         print(f"Scraping: {url}")
 
         html = fetch(url)
-        data = extract_events(html, url)
+        data = []
 
-        print(f"{name}: {len(data)} rows")
+        if html:
+            data = extract_events(html, url)
 
-        sheet = get_sheet(spreadsheet, name)
-        write_sheet(sheet, data)
+        print(f"{sheet_name}: {len(data)} rows")
 
-    # STEP 2 - RFPs
-    sheet = spreadsheet.worksheet("Pharmaceutical Sourcing Events")
-    rfps = get_rfps(sheet)
+        worksheet = get_or_create_worksheet(spreadsheet, sheet_name)
+        write_to_sheet(worksheet, data)
 
-    print(f"Found RFPs: {len(rfps)}")
-    print("Sample:", rfps[:5])
-
-    # STEP 3 - ARIBA
-    alerts = build_alerts(rfps[:20])
-
-    print(f"Total Alerts: {len(alerts)}")
-
-    # STEP 4 - WRITE
-    write_sheet(get_sheet(spreadsheet, "Tender Alerts"), alerts)
-
-    print("✅ DONE")
+    print("✅ Google Sheets updated successfully")
 
 
 if __name__ == "__main__":
