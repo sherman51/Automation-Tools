@@ -32,34 +32,6 @@ ARIBA_URL = "https://service.ariba.com/Sourcing.aw/advancesearch"
 SESSION_FILE = "ariba_state.json"
 
 
-# ---------------- PLAYWRIGHT SAFETY BOOTSTRAP ---------------- #
-
-def ensure_playwright_browsers():
-    """
-    Auto-fix missing Chromium in CI / fresh environments.
-    Prevents: Executable doesn't exist error.
-    """
-    try:
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            p.chromium.launch(headless=True)
-
-    except Exception:
-        print("⚠️ Playwright browser missing. Installing Chromium...")
-
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "chromium"],
-                check=True
-            )
-            print("✅ Chromium installed successfully")
-
-        except Exception as e:
-            print(f"❌ Failed to install Playwright browsers: {e}")
-            raise
-
-
 # ---------------- GOOGLE AUTH ---------------- #
 
 def get_google_creds():
@@ -180,7 +152,7 @@ def get_rfp_numbers(spreadsheet):
     return list(set(rfps))
 
 
-# ---------------- ARIBA SESSION ---------------- #
+# ---------------- ARIBA LOGIN ---------------- #
 
 def init_ariba_session():
     with sync_playwright() as p:
@@ -199,10 +171,21 @@ def init_ariba_session():
         browser.close()
 
 
+def ensure_session_exists():
+    """
+    Prevents crash when ariba_state.json is missing
+    """
+    if not os.path.exists(SESSION_FILE):
+        print("⚠️ No Ariba session found. Starting login flow...")
+        init_ariba_session()
+
+
 # ---------------- ARIBA SEARCH ---------------- #
 
 def search_ariba(keyword):
     results = []
+
+    ensure_session_exists()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -230,13 +213,10 @@ def search_ariba(keyword):
                 title_el = item.query_selector(".title")
                 link_el = item.query_selector("a")
 
-                title = title_el.inner_text() if title_el else ""
-                link = link_el.get_attribute("href") if link_el else ""
-
                 results.append({
                     "RFP No": keyword,
-                    "title": title,
-                    "link": link
+                    "title": title_el.inner_text() if title_el else "",
+                    "link": link_el.get_attribute("href") if link_el else ""
                 })
 
             except:
@@ -285,8 +265,6 @@ def write_tender_alerts(spreadsheet, data):
 # ---------------- MAIN ---------------- #
 
 def main():
-    ensure_playwright_browsers()
-
     spreadsheet = connect_spreadsheet()
 
     # STEP 1: SCRAPE ALPS
