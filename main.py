@@ -12,6 +12,20 @@ URL_SHEET_MAP = {
     "https://www.alpshealthcare.com.sg/strategic-procurement/pharmaceutical-sourcing-events/": "Pharmaceutical Sourcing Events",
 }
 
+PHARMA_HEADERS = [
+    "RFP No.",
+    "Event Description",
+    "Respond to posting",
+    "Published Date",
+    "Closing Date/ Time",
+    "Contract Period",
+    "Contract Quantity",
+    "Buffer Quantity",
+    "Financial Category",
+    "Corrigendum",
+    "Remarks"
+]
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     "Accept-Language": "en-US,en;q=0.9"
@@ -57,34 +71,41 @@ def extract_events(html, url):
     soup = BeautifulSoup(html, "html.parser")
     results = []
 
+    # 1. Table extraction
     tables = soup.find_all("table")
 
     for table in tables:
-        headers = [th.get_text(strip=True) for th in table.find_all("th")]
+        headers = [h.get_text(strip=True) for h in table.find_all("th")]
 
-        # Skip tables without headers (likely layout tables)
-        if not headers:
-            continue
-
-        rows = table.find_all("tr")
-
-        for tr in rows[1:]:  # skip header row
+        for tr in table.find_all("tr"):
             cols = [td.get_text(strip=True) for td in tr.find_all("td")]
 
-            # Skip malformed rows
-            if len(cols) != len(headers):
+            if not cols:
                 continue
 
             row = {"source_url": url}
 
-            for i in range(len(headers)):
-                row[headers[i]] = cols[i]
+            if headers and len(headers) == len(cols):
+                for i in range(len(headers)):
+                    row[headers[i]] = cols[i]
+            else:
+                for i, col in enumerate(cols):
+                    row[f"column_{i+1}"] = col
 
             results.append(row)
 
-        # Stop after first valid table
-        if results:
-            break
+    # 2. Fallback (list items)
+    if not results:
+        items = soup.find_all("li")
+
+        for item in items:
+            text = item.get_text(" ", strip=True)
+
+            if len(text) > 20:
+                results.append({
+                    "source_url": url,
+                    "content": text
+                })
 
     return results
 
@@ -108,18 +129,23 @@ def get_or_create_worksheet(spreadsheet, sheet_name):
     return worksheet
 
 
-def write_to_sheet(sheet, data):
+def write_to_sheet(sheet, data, headers=None):
     sheet.clear()
 
     if not data:
         print("No data found")
         return
 
-    headers = list(data[0].keys())
-    rows = [headers] + [
-        [row.get(h, "") for h in headers]
-        for row in data
-    ]
+    # Use custom headers if provided
+    if headers:
+        final_headers = headers
+    else:
+        final_headers = list(data[0].keys())
+
+    rows = [final_headers]
+
+    for row in data:
+        rows.append([row.get(h, "") for h in final_headers])
 
     sheet.update(rows)
 
@@ -140,7 +166,19 @@ def main():
         print(f"{sheet_name}: {len(data)} rows")
 
         worksheet = get_or_create_worksheet(spreadsheet, sheet_name)
-        write_to_sheet(worksheet, data)
+
+        # Apply fixed headers only for Pharmaceutical Sourcing Events
+        if sheet_name == "Pharmaceutical Sourcing Events":
+            write_to_sheet(
+                worksheet,
+                data,
+                headers=PHARMA_HEADERS
+            )
+        else:
+            write_to_sheet(
+                worksheet,
+                data
+            )
 
     print("✅ Google Sheets updated successfully")
 
