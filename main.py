@@ -55,12 +55,15 @@ def extract_events(html, url):
     soup = BeautifulSoup(html, "html.parser")
     results = []
 
+    # -------------------------------
+    # 1. Try table-based extraction
+    # -------------------------------
     tables = soup.find_all("table")
 
     for table in tables:
         headers = [h.get_text(strip=True) for h in table.find_all("th")]
 
-        for tr in table.find_all("tr")[1:]:
+        for tr in table.find_all("tr"):
             cols = [td.get_text(strip=True) for td in tr.find_all("td")]
 
             if not cols:
@@ -68,10 +71,30 @@ def extract_events(html, url):
 
             row = {"source_url": url}
 
-            for i in range(min(len(headers), len(cols))):
-                row[headers[i]] = cols[i]
+            if headers and len(headers) == len(cols):
+                for i in range(len(headers)):
+                    row[headers[i]] = cols[i]
+            else:
+                # fallback generic columns
+                for i, col in enumerate(cols):
+                    row[f"column_{i+1}"] = col
 
             results.append(row)
+
+    # -------------------------------
+    # 2. Fallback: extract list/card text
+    # -------------------------------
+    if not results:
+        items = soup.find_all("li")
+
+        for item in items:
+            text = item.get_text(" ", strip=True)
+
+            if len(text) > 20:  # avoid junk
+                results.append({
+                    "source_url": url,
+                    "content": text
+                })
 
     return results
 
