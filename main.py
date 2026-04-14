@@ -200,9 +200,21 @@ def ariba_login(driver, wait):
     with open("/tmp/ariba_login_page.html", "w") as f:
         f.write(driver.page_source)
 
-    # ── Both username and password are on the same page ──
+    # ── Print ALL inputs so we can see exactly what's on the page ──
+    inputs = driver.find_elements(By.TAG_NAME, "input")
+    print(f"Found {len(inputs)} inputs:")
+    for inp in inputs:
+        print(
+            f"  tag=input"
+            f"  type={inp.get_attribute('type')!r}"
+            f"  name={inp.get_attribute('name')!r}"
+            f"  id={inp.get_attribute('id')!r}"
+            f"  placeholder={inp.get_attribute('placeholder')!r}"
+            f"  value={inp.get_attribute('value')!r}"
+            f"  displayed={inp.is_displayed()}"
+        )
 
-    # Username field (placeholder: "Enter Username")
+    # Username
     username = wait.until(EC.presence_of_element_located(
         (By.XPATH, "//input[@placeholder='Enter Username' or @name='UserName' or @id='UserName']")
     ))
@@ -210,7 +222,7 @@ def ariba_login(driver, wait):
     username.send_keys(ARIBA_USERNAME)
     print("✓ Username entered")
 
-    # Password field (placeholder: "Enter Password")
+    # Password
     password = wait.until(EC.presence_of_element_located(
         (By.XPATH, "//input[@placeholder='Enter Password' or @type='password']")
     ))
@@ -218,20 +230,47 @@ def ariba_login(driver, wait):
     password.send_keys(ARIBA_PASSWORD)
     print("✓ Password entered")
 
-    # Login button
-    try:
-        login_btn = driver.find_element(
-            By.XPATH, "//input[@value='Login' or @type='submit'] | //button[contains(., 'Login')]"
+    driver.save_screenshot("/tmp/ariba_before_login_click.png")
+
+    # ── Print ALL buttons so we can see the Login button ──
+    buttons = driver.find_elements(By.XPATH, "//button | //input[@type='submit'] | //input[@type='button']")
+    print(f"Found {len(buttons)} buttons:")
+    for b in buttons:
+        print(
+            f"  tag={b.tag_name}"
+            f"  type={b.get_attribute('type')!r}"
+            f"  name={b.get_attribute('name')!r}"
+            f"  id={b.get_attribute('id')!r}"
+            f"  value={b.get_attribute('value')!r}"
+            f"  text={b.text!r}"
+            f"  displayed={b.is_displayed()}"
         )
-        driver.execute_script("arguments[0].click();", login_btn)
-        print("✓ Clicked Login button")
-    except:
-        print("⚠️ Login button not found — sending ENTER")
+
+    # Try clicking Login button via multiple strategies
+    clicked = False
+
+    # Try 1: input type=submit
+    for b in buttons:
+        if b.is_displayed():
+            try:
+                driver.execute_script("arguments[0].click();", b)
+                print(f"✓ Clicked button: tag={b.tag_name} value={b.get_attribute('value')!r} text={b.text!r}")
+                clicked = True
+                break
+            except:
+                continue
+
+    # Try 2: Enter key fallback
+    if not clicked:
+        print("⚠️ No button clicked — sending ENTER on password field")
         password.send_keys(Keys.RETURN)
 
     time.sleep(5)
 
     driver.save_screenshot("/tmp/ariba_post_login.png")
+    with open("/tmp/ariba_post_login.html", "w") as f:
+        f.write(driver.page_source)
+
     print("Post-login URL:", driver.current_url)
     print("Post-login Title:", driver.title)
 
