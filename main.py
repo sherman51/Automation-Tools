@@ -239,35 +239,94 @@ def ariba_login(driver, wait):
     print("Post-login URL:", driver.current_url)
     print("Post-login Title:", driver.title)
 
-    # ── Close the Company Profile popup if it appears (optional) ──
+    # ── Close the Company Profile popup if it appears ──
+    print("→ Checking for Company Profile popup...")
     try:
-        close_btn = WebDriverWait(driver, 5).until(
+        close_btn = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable(
                 (By.XPATH, "//button[normalize-space(text())='Close'] | //button[@title='Close']")
             )
         )
         driver.execute_script("arguments[0].click();", close_btn)
         print("✓ Closed Company Profile popup")
-        time.sleep(2)
+        time.sleep(3)
     except:
-        print("→ No popup, continuing...")
+        print("→ No Company Profile popup found, continuing...")
 
     driver.save_screenshot("/tmp/ariba_after_close_popup.png")
     print("After popup URL:", driver.current_url)
 
-# ---------------- ARIBA SEARCH ---------------- #
 
 def ariba_search_rfp(driver, wait, rfp_no):
-    print(f"Searching {rfp_no}")
-    url = f"https://service.ariba.com/Discovery.aw/ad/rfxList?rfxId={rfp_no}"
-    driver.get(url)
-    time.sleep(3)
+    print(f"Searching {rfp_no}...")
 
+    # Navigate to Discovery page
+    driver.get("https://service.ariba.com/Discovery.aw")
+    time.sleep(4)
+
+    driver.save_screenshot(f"/tmp/ariba_discovery_{rfp_no.replace(' ', '_')}.png")
+
+    # ── Type RFP number into the "By Product" search bar ──
+    try:
+        search_box = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.XPATH,
+                "//input[@placeholder='By Product' or contains(@placeholder,'Product') or contains(@aria-label,'Product')]"
+            ))
+        )
+        search_box.clear()
+        search_box.send_keys(rfp_no)
+        print(f"  ✓ Typed {rfp_no} into search bar")
+        time.sleep(1)
+        search_box.send_keys(Keys.RETURN)
+        print(f"  ✓ Search submitted")
+    except Exception as e:
+        print(f"  ⚠️ Search box not found: {e}")
+        return {
+            "RFP No.": rfp_no,
+            "Lead Title": "Error: search box not found",
+            "Status": "",
+            "Close Date": "",
+            "Ariba URL": driver.current_url
+        }
+
+    time.sleep(4)
+    driver.save_screenshot(f"/tmp/ariba_results_{rfp_no.replace(' ', '_')}.png")
+
+    # ── Extract results from the page ──
     soup = BeautifulSoup(driver.page_source, "html.parser")
+
+    # Try to find result rows in a table
+    lead_title = ""
+    status = ""
+    close_date = ""
+
+    # Look for table rows with RFP data
+    tables = soup.find_all("table")
+    for table in tables:
+        rows = table.find_all("tr")
+        for row in rows:
+            cells = row.find_all(["td", "th"])
+            row_text = " ".join(c.get_text(strip=True) for c in cells)
+            if rfp_no.replace(" ", "") in row_text.replace(" ", "") or rfp_no in row_text:
+                all_cells = [c.get_text(strip=True) for c in cells]
+                if all_cells:
+                    lead_title = all_cells[0] if len(all_cells) > 0 else ""
+                    status = all_cells[1] if len(all_cells) > 1 else ""
+                    close_date = all_cells[2] if len(all_cells) > 2 else ""
+                break
+
+    # Fallback: grab page title or any heading
+    if not lead_title:
+        heading = soup.find(["h1", "h2", "h3"])
+        lead_title = heading.get_text(strip=True) if heading else ""
+
+    print(f"  → Title: {lead_title!r} | Status: {status!r} | Close Date: {close_date!r}")
 
     return {
         "RFP No.": rfp_no,
-        "Lead Title": soup.title.text.strip() if soup.title else "",
+        "Lead Title": lead_title,
+        "Status": status,
+        "Close Date": close_date,
         "Ariba URL": driver.current_url
     }
 
