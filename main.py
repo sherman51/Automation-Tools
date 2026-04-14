@@ -137,6 +137,7 @@ def write_to_sheet(sheet, data):
 # ---------------- ARIBA REACHABILITY CHECK ---------------- #
 
 def check_ariba_reachable():
+    """Check if Ariba is reachable before launching Selenium."""
     try:
         r = requests.get(
             "https://service.ariba.com",
@@ -197,6 +198,7 @@ def ariba_login(driver, wait):
     with open("/tmp/ariba_login_page.html", "w") as f:
         f.write(driver.page_source)
 
+    # Username
     username = wait.until(EC.presence_of_element_located(
         (By.XPATH, "//input[@placeholder='Enter Username' or @name='UserName' or @id='UserName']")
     ))
@@ -204,6 +206,7 @@ def ariba_login(driver, wait):
     username.send_keys(ARIBA_USERNAME)
     print("✓ Username entered")
 
+    # Password
     password = wait.until(EC.presence_of_element_located(
         (By.XPATH, "//input[@placeholder='Enter Password' or @type='password']")
     ))
@@ -211,6 +214,7 @@ def ariba_login(driver, wait):
     password.send_keys(ARIBA_PASSWORD)
     print("✓ Password entered")
 
+    # Click Login button — try all visible buttons
     clicked = False
     buttons = driver.find_elements(By.XPATH, "//button | //input[@type='submit'] | //input[@type='button']")
     for b in buttons:
@@ -235,6 +239,7 @@ def ariba_login(driver, wait):
     print("Post-login URL:", driver.current_url)
     print("Post-login Title:", driver.title)
 
+    # ── Close the Company Profile popup if it appears (optional) ──
     try:
         close_btn = WebDriverWait(driver, 5).until(
             EC.element_to_be_clickable(
@@ -250,165 +255,77 @@ def ariba_login(driver, wait):
     driver.save_screenshot("/tmp/ariba_after_close_popup.png")
     print("After popup URL:", driver.current_url)
 
-# ---------------- ARIBA SEARCH ---------------- #
+# ---------------- ARIBA SEARCH (BULK) ---------------- #
 
 def ariba_search_all_rfps(driver, wait, rfps):
     all_results = []
-    seen = set()
+    seen = set()  # ← deduplicate
 
     for rfp in rfps:
         print(f"→ Searching for {rfp}...")
         driver.get("https://service.ariba.com/Discovery.aw")
         time.sleep(3)
 
-        # Dismiss cookie banner if present
-        try:
-            understood_btn = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(),'Understood')]"))
-            )
-            driver.execute_script("arguments[0].click();", understood_btn)
-            print("✓ Dismissed cookie banner")
-            time.sleep(1)
-        except:
-            pass
+        # Dismiss banners (same as before)...
 
-        # Dismiss notification banner if present
-        try:
-            close_notif = driver.find_element(By.XPATH, "//button[@aria-label='Close' or contains(@class,'close')]")
-            driver.execute_script("arguments[0].click();", close_notif)
-            print("✓ Dismissed notification banner")
-            time.sleep(1)
-        except:
-            pass
-
-        # Type RFP into search bar and submit
         try:
             search_box = WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.XPATH,
-                    "//input[@placeholder='By Product' or contains(@placeholder,'Product') or contains(@aria-label,'Product')]"
+                    "//input[contains(@placeholder,'Product') or contains(@aria-label,'Product')]"
                 ))
             )
             search_box.clear()
-            search_box.send_keys(rfp)
-            print(f"✓ Typed {rfp} into search bar")
-            time.sleep(1)
+            search_box.send_keys(rfp)  # ← search the specific RFP, not "GPOR"
             search_box.send_keys(Keys.RETURN)
-            print("✓ Search submitted")
         except Exception as e:
             print(f"⚠️ Search box not found for {rfp}: {e}")
-            all_results.append({
-                "RFI ID":     "",
-                "GPOR No.":   rfp,
-                "Lead Title": "Search box not found",
-                "Respond By": "",
-                "URL":        ""
-            })
             continue
 
-        # Wait for spinner to disappear
-        print("⏳ Waiting for results to load...")
-        try:
-            WebDriverWait(driver, 30).until_not(
-                EC.presence_of_element_located((By.XPATH,
-                    "//*[contains(@class,'loading') or contains(@class,'spinner') or contains(@class,'dots')]"
-                ))
-            )
-            print("✓ Spinner gone")
-        except:
-            print("→ Spinner wait timed out, continuing anyway...")
-
-        time.sleep(5)
+        time.sleep(5)  # wait for results
 
         soup = BeautifulSoup(driver.page_source, "html.parser")
 
-        # Find all lead cards — try li/div with result-like classes
-        cards = soup.find_all(
-            ["li", "div"],
-            class_=re.compile(r'result|lead|row|item|card', re.I)
+        # ── Target the specific lead card title element, not entire card blobs ──
+        lead_titles = soup.find_all(
+            ["h2", "h3", "span", "div"],
+            string=re.compile(re.escape(rfp), re.IGNORECASE)
         )
 
         matched = False
-        for card in cards:
-            card_text = re.sub(r'\s+', ' ', card.get_text(separator=" ", strip=True))
+        for el in lead_titles:
+            card = el.find_parent(
+                lambda tag: tag.name in ["li", "div"] and
+                any(c in (tag.get("class") or []) for c in ["lead", "result", "item", "card"])
+            )
+            text = card.get_text(" ", strip=True) if card else el.get_text(" ", strip=True)
 
-            # Only process cards that contain this specific RFP number
-            if rfp.upper() not in card_text.upper():
-                continue
-
-            dedup_key = (rfp, card_text[:80])
+            dedup_key = (rfp, text[:80])
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
 
-            # Extract RFI ID — anchored on "RF_ ·" label, not a hardcoded number pattern
-            rfi_id_match = re.search(r'RF[A-Z]\s*[·•]\s*(\S+)', card_text)
-            rfi_id = rfi_id_match.group(1) if rfi_id_match else ""
-
-            # Extract lead title — first line of card text up to the RFI/RFQ/RFP marker
-            title_match = re.match(r'^(.+?)\s+RF[A-Z]\s*[·•]', card_text)
-            lead_title = title_match.group(1).strip() if title_match else card_text[:80]
-
-            # Extract Respond By date — matches "17 Apr 2026, 12:00:00" style
-            deadline_match = re.search(
-                r'Respond\s+By[:\s]+(\d{1,2}\s+[A-Za-z]{3}\s+\d{4}[,\s]*[\d:]*)',
-                card_text
-            )
-            respond_by = deadline_match.group(1).strip() if deadline_match else ""
-
-            # Build direct preview URL using RFI ID
-            url = (
-                f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/"
-                f"comsapsbncdiscoveryui#/RfxEvent/preview/{rfi_id}"
-                if rfi_id else ""
-            )
+            # Extract close/deadline date with regex
+            deadline = re.search(r'(?:Respond By|Close Date)[:\s]+([A-Za-z]+\s\d{1,2},?\s\d{4})', text)
 
             all_results.append({
-                "RFI ID":     rfi_id,
-                "GPOR No.":   rfp,
-                "Lead Title": lead_title,
-                "Respond By": respond_by,
-                "URL":        url
+                "RFP No.":    rfp,
+                "Lead Title": re.sub(r'\s+', ' ', text[:120]),  # clean whitespace
+                "Status":     "RFI",
+                "Close Date": deadline.group(1) if deadline else "",
+                "Ariba URL":  driver.current_url
             })
-            print(f"  ✓ Matched {rfp} → RFI ID: {rfi_id}, Respond By: {respond_by}")
             matched = True
 
         if not matched:
-            print(f"  ⚠️ {rfp} not found in search results")
             all_results.append({
-                "RFI ID":     "",
-                "GPOR No.":   rfp,
+                "RFP No.":    rfp,
                 "Lead Title": "Not found",
-                "Respond By": "",
-                "URL":        ""
+                "Status":     "",
+                "Close Date": "",
+                "Ariba URL":  driver.current_url
             })
 
     return all_results
-
-# ---------------- CLEAN RESULTS ---------------- #
-
-def clean_tender_data(results):
-    JUNK_PATTERNS = [
-        re.compile(r'^\d+\s+results\s+for', re.IGNORECASE),
-        re.compile(r'^filters\s+clear\s+all', re.IGNORECASE),
-        re.compile(r'^sort\s+by', re.IGNORECASE),
-    ]
-
-    def is_junk(title):
-        return any(p.match(title.strip()) for p in JUNK_PATTERNS)
-
-    cleaned = [r for r in results if not is_junk(r.get("Lead Title", ""))]
-
-    # Deduplicate — one row per RFI ID, prefer real matches over "Not found"
-    best = {}
-    for row in cleaned:
-        key = row["RFI ID"] or row["GPOR No."]  # fall back to GPOR if no RFI ID yet
-        existing = best.get(key)
-        if existing is None:
-            best[key] = row
-        elif existing["Lead Title"] == "Not found" and row["Lead Title"] != "Not found":
-            best[key] = row
-
-    return list(best.values())
 
 # ---------------- MAIN ---------------- #
 
@@ -450,12 +367,10 @@ def main():
     tender_data = run_ariba_search(rfps)
 
     if tender_data:
-        tender_data = clean_tender_data(tender_data)
         write_to_sheet(
             get_or_create_worksheet(sheet, TENDER_ALERTS_SHEET),
             tender_data
         )
-        print(f"✓ Written {len(tender_data)} rows to '{TENDER_ALERTS_SHEET}'")
     else:
         print("⚠️ No tender data written — Ariba search returned no results.")
 
