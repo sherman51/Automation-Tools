@@ -34,7 +34,7 @@ SCOPES = [
 
 SPREADSHEET_ID = "1ZGf468X845aw8pJ4hmdyYHsV7JrrHhZsCxq4mXLrRdg"
 
-ARIBA_LOGIN_URL = "https://service.ariba.com/Authenticator.aw/ad/ssoIDP"
+ARIBA_LOGIN_URL = "https://service.ariba.com/Sourcing.aw/109555013/aw?awh=r&awssk=hM.EAy31&dard=1"
 
 ARIBA_USERNAME = os.getenv("ARIBA_USERNAME", "")
 ARIBA_PASSWORD = os.getenv("ARIBA_PASSWORD", "")
@@ -160,76 +160,36 @@ def build_driver(headless=True):
 def ariba_login(driver, wait):
     print("→ Opening Ariba login...")
     driver.get(ARIBA_LOGIN_URL)
-    time.sleep(5)
 
-    print("URL:", driver.current_url)
-    print("Title:", driver.title)
-
-    driver.save_screenshot("/tmp/ariba_login_page.png")
-    with open("/tmp/ariba_login_page.html", "w") as f:
-        f.write(driver.page_source)
-
-    # Username
-    username = wait.until(EC.presence_of_element_located((By.NAME, "userid")))
+    # Wait for username
+    username = wait.until(
+        EC.visibility_of_element_located((By.XPATH, "//input[@type='text' or @name='userid']"))
+    )
+    username.clear()
     username.send_keys(ARIBA_USERNAME)
     print("✓ Username entered")
 
-    # Find ANY button
-    buttons = driver.find_elements(By.XPATH, "//button | //input[@type='submit']")
-    print(f"Found {len(buttons)} buttons")
-
-    next_btn = None
-
-    for b in buttons:
-        try:
-            text = (b.text or "").lower()
-            val = (b.get_attribute("value") or "").lower()
-
-            print("Button:", text, "|", val, "| displayed:", b.is_displayed())
-
-            if "next" in text or "next" in val:
-                if b.is_displayed():
-                    next_btn = b
-                    break
-        except:
-            continue
-
-    # fallback
-    if not next_btn:
-        print("⚠️ Using fallback button")
-        for b in buttons:
-            if b.is_displayed():
-                next_btn = b
-                break
-
-    if not next_btn:
-        raise Exception("No clickable button found")
-
-    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", next_btn)
-    time.sleep(1)
-
-    try:
-        next_btn.click()
-    except:
-        ActionChains(driver).move_to_element(next_btn).click().perform()
-
-    print("✓ Clicked button")
-
     # Wait for password
-    print("⏳ Waiting for password field...")
-    try:
-        wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
-    except:
-        driver.save_screenshot("/tmp/ariba_no_password.png")
-        with open("/tmp/ariba_after_click.html", "w") as f:
-            f.write(driver.page_source)
-        raise Exception("Password field never appeared")
-
-    password = driver.find_element(By.XPATH, "//input[@type='password']")
+    password = wait.until(
+        EC.visibility_of_element_located((By.XPATH, "//input[@type='password']"))
+    )
+    password.clear()
     password.send_keys(ARIBA_PASSWORD)
-    password.send_keys(Keys.RETURN)
+    print("✓ Password entered")
 
-    print("✓ Login submitted")
+    # Click login
+    login_btn = wait.until(
+        EC.element_to_be_clickable((
+            By.XPATH,
+            "//button[contains(., 'Login')] "
+            "| //button[contains(., 'Sign in')] "
+            "| //input[@type='submit']"
+        ))
+    )
+
+    driver.execute_script("arguments[0].click();", login_btn)
+    print("✓ Clicked login")
+
     time.sleep(5)
 
 # ---------------- ARIBA SEARCH ---------------- #
