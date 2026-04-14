@@ -167,72 +167,63 @@ def ariba_login(driver, wait):
     driver.save_screenshot("/tmp/ariba_step1_login_page.png")
 
     # --- Step 1: Enter username ---
-    try:
-        username = wait.until(EC.presence_of_element_located((By.NAME, "userid")))
-    except:
-        username = wait.until(EC.presence_of_element_located((By.XPATH,
-            "//input[@type='text' or @placeholder='Username']"
-        )))
-
+    username = wait.until(EC.presence_of_element_located((By.NAME, "userid")))
     username.clear()
     username.send_keys(ARIBA_USERNAME)
     print("✓ Username entered")
     time.sleep(1)
-    username.send_keys(Keys.RETURN)
-    print("✓ Submitted username via Enter")
 
-    # --- Step 2: Wait and inspect what appeared ---
-    time.sleep(5)
-    print("Post-username URL:", driver.current_url)
-    print("Post-username Title:", driver.title)
+    # --- Step 2: Click Next button ---
+    # SAP renders "Next" as visible button text — find by exact text
+    next_btn = wait.until(EC.element_to_be_clickable((By.XPATH,
+        "//button[normalize-space(text())='Next'] | "
+        "//input[@value='Next'] | "
+        "//button[contains(@class,'next')] | "
+        "//button[@type='submit']"
+    )))
+
+    print(f"✓ Found Next button: tag={next_btn.tag_name} "
+          f"text='{next_btn.text}' type={next_btn.get_attribute('type')}")
+
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", next_btn)
+    time.sleep(0.5)
+
+    # Try JS click first (bypasses any overlay issues in headless mode)
+    driver.execute_script("arguments[0].click();", next_btn)
+    print("✓ Clicked Next button")
+
+    # --- Step 3: Wait for password field ---
+    time.sleep(3)
     driver.save_screenshot("/tmp/ariba_step2_after_username.png")
+    print("Post-click URL:", driver.current_url)
+    print("Post-click Title:", driver.title)
 
-    page_src = driver.page_source.lower()
-
-    # Detect what kind of page we're on
-    has_password   = bool(driver.find_elements(By.XPATH, "//input[@type='password']"))
-    has_sso        = "single sign" in page_src or "sso" in page_src
-    has_saml       = "saml" in page_src
-    has_okta       = "okta" in page_src
-    has_error      = "error" in page_src or "invalid" in page_src
-    has_captcha    = "captcha" in page_src or "recaptcha" in page_src
-
-    print(f"has_password={has_password}, has_sso={has_sso}, has_saml={has_saml}, "
-          f"has_okta={has_okta}, has_error={has_error}, has_captcha={has_captcha}")
-
-    if has_captcha:
-        raise Exception("CAPTCHA detected — automation blocked. Consider using session cookies instead.")
-
-    if has_error:
-        raise Exception("Login error page detected after username — check credentials or account status.")
-
-    if not has_password:
-        # Page changed but no password field — dump info for debugging
-        with open("/tmp/ariba_step2_after_username.html", "w") as f:
+    print("⏳ Waiting for password field...")
+    try:
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.XPATH, "//input[@type='password']"))
+        )
+        print("✓ Password field appeared")
+    except:
+        driver.save_screenshot("/tmp/ariba_no_password.png")
+        with open("/tmp/ariba_after_click.html", "w") as f:
             f.write(driver.page_source)
 
-        # Try waiting a bit longer — some SSO pages are slow
-        print("⏳ Password field not immediate, waiting up to 15s more...")
-        try:
-            wait_long = WebDriverWait(driver, 15)
-            wait_long.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
-            has_password = True
-            print("✓ Password field appeared after extended wait")
-        except:
-            print("Still no password field. Dumping all visible inputs:")
-            inputs = driver.find_elements(By.XPATH, "//input")
-            for inp in inputs:
-                print(f"  input type={inp.get_attribute('type')} "
-                      f"name={inp.get_attribute('name')} "
-                      f"id={inp.get_attribute('id')} "
-                      f"placeholder={inp.get_attribute('placeholder')} "
-                      f"visible={inp.is_displayed()}")
-            raise Exception(
-                f"Password field never appeared. URL={driver.current_url} "
-                f"Title={driver.title} — check /tmp/ariba_step2_after_username.html"
-            )
+        # Log all inputs on page for diagnosis
+        inputs = driver.find_elements(By.XPATH, "//input")
+        print(f"Inputs found on page ({len(inputs)}):")
+        for inp in inputs:
+            print(f"  type={inp.get_attribute('type')} "
+                  f"name={inp.get_attribute('name')} "
+                  f"id={inp.get_attribute('id')} "
+                  f"visible={inp.is_displayed()}")
 
-    # --- Step 3: Enter password ---
+        raise Exception(
+            f"Password field never appeared. URL={driver.current_url} "
+            "— check /tmp/ariba_no_password.png"
+        )
+
+    # --- Step 4: Enter password ---
     password = driver.find_element(By.XPATH, "//input[@type='password']")
     password.clear()
     password.send_keys(ARIBA_PASSWORD)
