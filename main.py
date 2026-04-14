@@ -219,15 +219,73 @@ def ariba_login(driver, wait):
 
 def ariba_search_rfp(driver, wait, rfp_no):
     print(f"Searching {rfp_no}")
-    url = f"https://service.ariba.com/Discovery.aw/ad/rfxList?rfxId={rfp_no}"
-    driver.get(url)
+
+    # Navigate to dashboard
+    driver.get("https://portal.us.bn.cloud.ariba.com/dashboard/")
     time.sleep(3)
+
+    # Step 1: Type RFP number into the "By Product" search box
+    search_input = wait.until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, "input.search-input[placeholder='By Product']"))
+    )
+    search_input.clear()
+    search_input.click()
+    time.sleep(1)
+    search_input.send_keys(rfp_no)
+    time.sleep(1)
+    search_input.send_keys(Keys.RETURN)
+    time.sleep(4)  # Wait for results page to load
+
+    # Step 2: Filter by Singapore in the location multi-input
+    try:
+        location_input = wait.until(
+            EC.presence_of_element_located((By.ID, "__xmlview1--idLocationFilterMultiInput-inner"))
+        )
+        location_input.click()
+        time.sleep(1)
+        location_input.send_keys("Singapore")
+        time.sleep(2)  # Wait for dropdown suggestions to appear
+
+        # Select the first suggestion from the SAP UI dropdown
+        suggestion = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, ".sapMSuggestionItem, [class*='suggestion'], [class*='popover'] li"))
+        )
+        suggestion.click()
+        time.sleep(3)  # Wait for filtered results
+
+    except Exception as e:
+        print(f"  ⚠️ Could not apply Singapore filter: {e}")
+
+    # DEBUG: save page for inspection (remove once working)
+    with open(f"/tmp/ariba_{rfp_no.replace(' ', '_')}.html", "w") as f:
+        f.write(driver.page_source)
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
 
+    # Step 3: Extract lead titles from results
+    lead_title = ""
+    for selector in [
+        "[class*='sapMLnk']",         # SAP UI5 link elements
+        "[class*='title']",
+        "[class*='rfx-name']",
+        "[class*='leadTitle']",
+        "[class*='itemTitle']",
+        ".sapMListTblCell",            # SAP table cells
+        "[class*='result'] td",
+        "h1", "h2", "h3",
+    ]:
+        el = soup.select_one(selector)
+        if el:
+            text = el.get_text(strip=True)
+            if text and len(text) > 5 and text.lower() not in ("", "ariba", "sap ariba", "by product", "select or type location"):
+                lead_title = text
+                break
+
+    print(f"  → Title: {lead_title}")
+
     return {
         "RFP No.": rfp_no,
-        "Lead Title": soup.title.text.strip() if soup.title else "",
+        "Lead Title": lead_title,
         "Ariba URL": driver.current_url
     }
 
