@@ -36,7 +36,7 @@ SCOPES = [
 
 SPREADSHEET_ID = "1ZGf468X845aw8pJ4hmdyYHsV7JrrHhZsCxq4mXLrRdg"
 
-ARIBA_LOGIN_URL = "https://service.ariba.com/Authenticator.aw/ad/ssoIDP"
+ARIBA_LOGIN_URL = "https://service.ariba.com/Authenticator.aw"
 
 ARIBA_USERNAME = os.getenv("ARIBA_USERNAME", "")
 ARIBA_PASSWORD = os.getenv("ARIBA_PASSWORD", "")
