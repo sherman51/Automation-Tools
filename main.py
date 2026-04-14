@@ -143,6 +143,7 @@ def build_driver(headless=True):
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--window-size=1920,1080")
 
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
@@ -174,21 +175,17 @@ def ariba_login(driver, wait):
     time.sleep(1)
 
     # --- Step 2: Click Next button ---
-    # SAP renders "Next" as visible button text — find by exact text
-    next_btn = wait.until(EC.element_to_be_clickable((By.XPATH,
-        "//button[normalize-space(text())='Next'] | "
-        "//input[@value='Next'] | "
-        "//button[contains(@class,'next')] | "
-        "//button[@type='submit']"
+    # The clickable element is <a class="w-login-page-form-btn"> wrapping the visible Next span
+    next_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR,
+        "a.w-login-page-form-btn"
     )))
 
     print(f"✓ Found Next button: tag={next_btn.tag_name} "
-          f"text='{next_btn.text}' type={next_btn.get_attribute('type')}")
+          f"id={next_btn.get_attribute('id')} "
+          f"class={next_btn.get_attribute('class')}")
 
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", next_btn)
     time.sleep(0.5)
-
-    # Try JS click first (bypasses any overlay issues in headless mode)
     driver.execute_script("arguments[0].click();", next_btn)
     print("✓ Clicked Next button")
 
@@ -209,7 +206,6 @@ def ariba_login(driver, wait):
         with open("/tmp/ariba_after_click.html", "w") as f:
             f.write(driver.page_source)
 
-        # Log all inputs on page for diagnosis
         inputs = driver.find_elements(By.XPATH, "//input")
         print(f"Inputs found on page ({len(inputs)}):")
         for inp in inputs:
