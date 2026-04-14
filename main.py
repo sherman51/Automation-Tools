@@ -143,7 +143,6 @@ def build_driver(headless=True):
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--window-size=1920,1080")
 
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
@@ -158,144 +157,94 @@ def build_driver(headless=True):
 
 # ---------------- ARIBA LOGIN ---------------- #
 
-ARIBA_COOKIES_JSON = os.getenv("ARIBA_COOKIES_JSON", "")
-
-def load_cookies(driver):
-    """Load saved cookies into the browser session."""
-    if not ARIBA_COOKIES_JSON:
-        raise Exception("Missing ARIBA_COOKIES_JSON environment variable")
-
-    cookies = json.loads(ARIBA_COOKIES_JSON)
-
-    # Must navigate to the domain first before setting cookies
-    driver.get("https://service.ariba.com")
-    time.sleep(3)
-
-    for cookie in cookies:
-        # Selenium only accepts specific cookie fields — strip extras
-        cleaned = {
-            "name":   cookie["name"],
-            "value":  cookie["value"],
-            "domain": cookie["domain"],
-            "path":   cookie.get("path", "/"),
-            "secure": cookie.get("secure", False),
-        }
-
-        # Add expiry only if it exists and is a non-session cookie
-        if "expirationDate" in cookie:
-            cleaned["expiry"] = int(cookie["expirationDate"])
-
-        try:
-            driver.add_cookie(cleaned)
-        except Exception as e:
-            print(f"⚠️ Skipped cookie {cookie['name']}: {e}")
-
-    print(f"✓ Loaded {len(cookies)} cookies")
-
-
 def ariba_login(driver, wait):
-    print("→ Loading Ariba session via cookies...")
-
-    load_cookies(driver)
-
-    # Navigate to the main supplier page to activate the session
-    driver.get("https://service.ariba.com/Supplier.aw/ad/landing")
+    print("→ Opening Ariba login...")
+    driver.get(ARIBA_LOGIN_URL)
     time.sleep(5)
 
-    driver.save_screenshot("/tmp/ariba_step1_after_cookies.png")
     print("URL:", driver.current_url)
     print("Title:", driver.title)
 
-    # Check if we're logged in (not redirected back to login page)
-    if "Authenticator" in driver.current_url or "ssoIDP" in driver.current_url:
-        raise Exception(
-            "Cookie session expired or invalid — redirected to login. "
-            "Please refresh your ariba_cookies.json."
-        )
+    driver.save_screenshot("/tmp/ariba_login_page.png")
+    with open("/tmp/ariba_login_page.html", "w") as f:
+        f.write(driver.page_source)
 
-    print("✓ Session restored via cookies")
+    # Username
+    username = wait.until(EC.presence_of_element_located((By.NAME, "userid")))
+    username.send_keys(ARIBA_USERNAME)
+    print("✓ Username entered")
+
+    # Find ANY button
+    buttons = driver.find_elements(By.XPATH, "//button | //input[@type='submit']")
+    print(f"Found {len(buttons)} buttons")
+
+    next_btn = None
+
+    for b in buttons:
+        try:
+            text = (b.text or "").lower()
+            val = (b.get_attribute("value") or "").lower()
+
+            print("Button:", text, "|", val, "| displayed:", b.is_displayed())
+
+            if "next" in text or "next" in val:
+                if b.is_displayed():
+                    next_btn = b
+                    break
+        except:
+            continue
+
+    # fallback
+    if not next_btn:
+        print("⚠️ Using fallback button")
+        for b in buttons:
+            if b.is_displayed():
+                next_btn = b
+                break
+
+    if not next_btn:
+        raise Exception("No clickable button found")
+
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", next_btn)
+    time.sleep(1)
+
+    try:
+        next_btn.click()
+    except:
+        ActionChains(driver).move_to_element(next_btn).click().perform()
+
+    print("✓ Clicked button")
+
+    # Wait for password
+    print("⏳ Waiting for password field...")
+    try:
+        wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
+    except:
+        driver.save_screenshot("/tmp/ariba_no_password.png")
+        with open("/tmp/ariba_after_click.html", "w") as f:
+            f.write(driver.page_source)
+        raise Exception("Password field never appeared")
+
+    password = driver.find_element(By.XPATH, "//input[@type='password']")
+    password.send_keys(ARIBA_PASSWORD)
+    password.send_keys(Keys.RETURN)
+
+    print("✓ Login submitted")
+    time.sleep(5)
 
 # ---------------- ARIBA SEARCH ---------------- #
 
-def screenshot(driver, name):
-    path = f"/tmp/ss_{name}.png"
-    driver.save_screenshot(path)
-    print(f"  📸 Screenshot saved: {path}")
-
 def ariba_search_rfp(driver, wait, rfp_no):
     print(f"Searching {rfp_no}")
-
-    # Navigate to dashboard
-    driver.get("https://portal.us.bn.cloud.ariba.com/dashboard/")
+    url = f"https://service.ariba.com/Discovery.aw/ad/rfxList?rfxId={rfp_no}"
+    driver.get(url)
     time.sleep(3)
-    screenshot(driver, "01_dashboard")
-
-    # Step 1: Type RFP number into the "By Product" search box
-    search_input = wait.until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "input.search-input[placeholder='By Product']"))
-    )
-    search_input.clear()
-    search_input.click()
-    time.sleep(1)
-    search_input.send_keys(rfp_no)
-    time.sleep(1)
-    screenshot(driver, f"02_typed_{rfp_no.replace(' ', '_')}")
-
-    search_input.send_keys(Keys.RETURN)
-    time.sleep(4)
-    screenshot(driver, f"03_results_{rfp_no.replace(' ', '_')}")
-
-    # Step 2: Type Singapore and hit Enter in the location filter
-    try:
-        location_input = wait.until(
-            EC.presence_of_element_located((By.ID, "__xmlview1--idLocationFilterMultiInput-inner"))
-        )
-        location_input.click()
-        time.sleep(1)
-        location_input.send_keys("Singapore")
-        time.sleep(1)
-        screenshot(driver, f"04_singapore_typed_{rfp_no.replace(' ', '_')}")
-
-        location_input.send_keys(Keys.RETURN)
-        time.sleep(3)
-        screenshot(driver, f"05_singapore_filtered_{rfp_no.replace(' ', '_')}")
-
-    except Exception as e:
-        print(f"  ⚠️ Could not apply Singapore filter: {e}")
-        screenshot(driver, f"04_singapore_error_{rfp_no.replace(' ', '_')}")
-
-    # Save HTML for inspection
-    with open(f"/tmp/ariba_{rfp_no.replace(' ', '_')}.html", "w") as f:
-        f.write(driver.page_source)
-    print(f"  💾 HTML saved: /tmp/ariba_{rfp_no.replace(' ', '_')}.html")
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
 
-    # Step 3: Extract lead titles from results
-    lead_title = ""
-    for selector in [
-        "[class*='sapMLnk']",
-        "[class*='title']",
-        "[class*='rfx-name']",
-        "[class*='leadTitle']",
-        "[class*='itemTitle']",
-        ".sapMListTblCell",
-        "[class*='result'] td",
-        "h1", "h2", "h3",
-    ]:
-        el = soup.select_one(selector)
-        if el:
-            text = el.get_text(strip=True)
-            if text and len(text) > 5 and text.lower() not in ("", "ariba", "sap ariba", "by product", "select or type location"):
-                lead_title = text
-                break
-
-    screenshot(driver, f"06_done_{rfp_no.replace(' ', '_')}")
-    print(f"  → Title: {lead_title}")
-
     return {
         "RFP No.": rfp_no,
-        "Lead Title": lead_title,
+        "Lead Title": soup.title.text.strip() if soup.title else "",
         "Ariba URL": driver.current_url
     }
 
