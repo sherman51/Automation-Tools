@@ -11,9 +11,11 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 
 # ---------------- CONFIG ---------------- #
 
@@ -132,6 +134,23 @@ def write_to_sheet(sheet, data):
     rows = [headers] + [[row.get(h,"") for h in headers] for row in data]
     sheet.update(rows)
 
+# ---------------- ARIBA REACHABILITY CHECK ---------------- #
+
+def check_ariba_reachable():
+    """Check if Ariba is reachable before launching Selenium.
+    GitHub Actions runners are sometimes blocked by Ariba's SSO endpoint."""
+    try:
+        r = requests.get(
+            "https://service.ariba.com",
+            headers=HEADERS,
+            timeout=10
+        )
+        print(f"✓ Ariba reachable: HTTP {r.status_code}")
+        return True
+    except Exception as e:
+        print(f"✗ Ariba not reachable: {e}")
+        return False
+
 # ---------------- SELENIUM ---------------- #
 
 def build_driver(headless=True):
@@ -140,14 +159,21 @@ def build_driver(headless=True):
     if headless:
         options.add_argument("--headless=new")
 
+    # Required flags for CI / headless Linux environments
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--remote-debugging-port=9222")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-extensions")
     options.add_argument("--disable-blink-features=AutomationControlled")
 
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
-    driver = webdriver.Chrome(options=options)
+    # Use webdriver_manager to auto-match ChromeDriver to installed Chrome version
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
 
     driver.execute_script(
         "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
@@ -251,6 +277,12 @@ def ariba_search_rfp(driver, wait, rfp_no):
 # ---------------- MAIN ---------------- #
 
 def run_ariba_search(rfps):
+    # Pre-flight: check if Ariba is reachable before spinning up Chrome
+    if not check_ariba_reachable():
+        print("⚠️ Skipping Ariba search — endpoint unreachable from this runner.")
+        print("   This is common on GitHub Actions due to Ariba's IP restrictions.")
+        return []
+
     driver = build_driver(headless=True)
     wait = WebDriverWait(driver, 20)
 
@@ -260,7 +292,18 @@ def run_ariba_search(rfps):
         ariba_login(driver, wait)
 
         for r in rfps:
-            results.append(ariba_search_rfp(driver, wait, r))
+            try:
+                results.append(ariba_search_rfp(driver, wait, r))
+            except Exception as e:
+                print(f"⚠️ Failed to search RFP {r}: {e}")
+                results.append({
+                    "RFP No.": r,
+                    "Lead Title": f"Error: {e}",
+                    "Ariba URL": ""
+                })
+
+    except Exception as e:
+        print(f"✗ Ariba session failed: {e}")
 
     finally:
         driver.quit()
@@ -285,10 +328,13 @@ def main():
 
     tender_data = run_ariba_search(rfps)
 
-    write_to_sheet(
-        get_or_create_worksheet(sheet, TENDER_ALERTS_SHEET),
-        tender_data
-    )
+    if tender_data:
+        write_to_sheet(
+            get_or_create_worksheet(sheet, TENDER_ALERTS_SHEET),
+            tender_data
+        )
+    else:
+        print("⚠️ No tender data written — Ariba search returned no results.")
 
 if __name__ == "__main__":
     main()
