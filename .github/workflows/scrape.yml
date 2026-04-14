@@ -8,12 +8,10 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
     env:
       GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
       ARIBA_USERNAME: ${{ secrets.ARIBA_USERNAME }}
       ARIBA_PASSWORD: ${{ secrets.ARIBA_PASSWORD }}
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,7 +27,7 @@ jobs:
       - name: Install Chrome and ChromeDriver
         uses: browser-actions/setup-chrome@v1
 
-      - name: Run scraper
+      - name: Run python main.py
         run: python main.py
 
       - name: Upload debug screenshots
@@ -37,4 +35,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ariba-debug-screenshots
-          path: /tmp/ariba_step*.png
+          path: |
+            /tmp/ariba_step1_login_page.png
+            /tmp/ariba_step2_after_username.png
+            /tmp/ariba_step2_after_username.html
+            /tmp/ariba_step3_post_login.png
+          if-no-files-found: ignore
