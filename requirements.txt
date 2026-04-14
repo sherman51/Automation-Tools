@@ -1,12 +1,10 @@
 requests==2.31.0
 beautifulsoup4==4.12.2
 lxml==4.9.3
-
 gspread
 pandas
-
 google-auth
 google-auth-oauthlib
 google-auth-httplib2
-
 selenium
+webdriver-manager
