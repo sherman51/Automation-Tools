@@ -200,20 +200,6 @@ def ariba_login(driver, wait):
     with open("/tmp/ariba_login_page.html", "w") as f:
         f.write(driver.page_source)
 
-    # ── Print ALL inputs so we can see exactly what's on the page ──
-    inputs = driver.find_elements(By.TAG_NAME, "input")
-    print(f"Found {len(inputs)} inputs:")
-    for inp in inputs:
-        print(
-            f"  tag=input"
-            f"  type={inp.get_attribute('type')!r}"
-            f"  name={inp.get_attribute('name')!r}"
-            f"  id={inp.get_attribute('id')!r}"
-            f"  placeholder={inp.get_attribute('placeholder')!r}"
-            f"  value={inp.get_attribute('value')!r}"
-            f"  displayed={inp.is_displayed()}"
-        )
-
     # Username
     username = wait.until(EC.presence_of_element_located(
         (By.XPATH, "//input[@placeholder='Enter Username' or @name='UserName' or @id='UserName']")
@@ -230,49 +216,44 @@ def ariba_login(driver, wait):
     password.send_keys(ARIBA_PASSWORD)
     print("✓ Password entered")
 
-    driver.save_screenshot("/tmp/ariba_before_login_click.png")
-
-    # ── Print ALL buttons so we can see the Login button ──
-    buttons = driver.find_elements(By.XPATH, "//button | //input[@type='submit'] | //input[@type='button']")
-    print(f"Found {len(buttons)} buttons:")
-    for b in buttons:
-        print(
-            f"  tag={b.tag_name}"
-            f"  type={b.get_attribute('type')!r}"
-            f"  name={b.get_attribute('name')!r}"
-            f"  id={b.get_attribute('id')!r}"
-            f"  value={b.get_attribute('value')!r}"
-            f"  text={b.text!r}"
-            f"  displayed={b.is_displayed()}"
-        )
-
-    # Try clicking Login button via multiple strategies
+    # Click Login button — try all visible buttons
     clicked = False
-
-    # Try 1: input type=submit
+    buttons = driver.find_elements(By.XPATH, "//button | //input[@type='submit'] | //input[@type='button']")
     for b in buttons:
         if b.is_displayed():
             try:
                 driver.execute_script("arguments[0].click();", b)
-                print(f"✓ Clicked button: tag={b.tag_name} value={b.get_attribute('value')!r} text={b.text!r}")
+                print(f"✓ Clicked login button: {b.tag_name} / {b.get_attribute('value')!r} / {b.text!r}")
                 clicked = True
                 break
             except:
                 continue
 
-    # Try 2: Enter key fallback
     if not clicked:
-        print("⚠️ No button clicked — sending ENTER on password field")
+        print("⚠️ No button clicked — sending ENTER")
         password.send_keys(Keys.RETURN)
 
-    time.sleep(5)
+    time.sleep(6)
 
     driver.save_screenshot("/tmp/ariba_post_login.png")
-    with open("/tmp/ariba_post_login.html", "w") as f:
-        f.write(driver.page_source)
-
     print("Post-login URL:", driver.current_url)
     print("Post-login Title:", driver.title)
+
+    # ── Close the Company Profile popup if it appears (optional) ──
+    try:
+        close_btn = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable(
+                (By.XPATH, "//button[normalize-space(text())='Close'] | //button[@title='Close']")
+            )
+        )
+        driver.execute_script("arguments[0].click();", close_btn)
+        print("✓ Closed Company Profile popup")
+        time.sleep(2)
+    except:
+        print("→ No popup, continuing...")
+
+    driver.save_screenshot("/tmp/ariba_after_close_popup.png")
+    print("After popup URL:", driver.current_url)
 
 # ---------------- ARIBA SEARCH ---------------- #
 
