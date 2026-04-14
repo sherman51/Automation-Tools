@@ -158,100 +158,62 @@ def build_driver(headless=True):
 
 # ---------------- ARIBA LOGIN ---------------- #
 
+ARIBA_COOKIES_JSON = os.getenv("ARIBA_COOKIES_JSON", "")
+
+def load_cookies(driver):
+    """Load saved cookies into the browser session."""
+    if not ARIBA_COOKIES_JSON:
+        raise Exception("Missing ARIBA_COOKIES_JSON environment variable")
+
+    cookies = json.loads(ARIBA_COOKIES_JSON)
+
+    # Must navigate to the domain first before setting cookies
+    driver.get("https://service.ariba.com")
+    time.sleep(3)
+
+    for cookie in cookies:
+        # Selenium only accepts specific cookie fields — strip extras
+        cleaned = {
+            "name":   cookie["name"],
+            "value":  cookie["value"],
+            "domain": cookie["domain"],
+            "path":   cookie.get("path", "/"),
+            "secure": cookie.get("secure", False),
+        }
+
+        # Add expiry only if it exists and is a non-session cookie
+        if "expirationDate" in cookie:
+            cleaned["expiry"] = int(cookie["expirationDate"])
+
+        try:
+            driver.add_cookie(cleaned)
+        except Exception as e:
+            print(f"⚠️ Skipped cookie {cookie['name']}: {e}")
+
+    print(f"✓ Loaded {len(cookies)} cookies")
+
+
 def ariba_login(driver, wait):
-    print("→ Opening Ariba login...")
-    driver.get(ARIBA_LOGIN_URL)
+    print("→ Loading Ariba session via cookies...")
+
+    load_cookies(driver)
+
+    # Navigate to the main supplier page to activate the session
+    driver.get("https://service.ariba.com/Supplier.aw/ad/landing")
     time.sleep(5)
 
+    driver.save_screenshot("/tmp/ariba_step1_after_cookies.png")
     print("URL:", driver.current_url)
     print("Title:", driver.title)
-    driver.save_screenshot("/tmp/ariba_step1_login_page.png")
 
-    # --- Step 1: Enter username ---
-    username = wait.until(EC.presence_of_element_located((By.NAME, "userid")))
-    username.clear()
-
-    # Type character by character to trigger SAP's JS listeners
-    for char in ARIBA_USERNAME:
-        username.send_keys(char)
-        time.sleep(0.05)
-
-    print("✓ Username entered")
-
-    # Trigger change/blur events so SAP's form JS recognises the value
-    driver.execute_script("""
-        var el = arguments[0];
-        el.dispatchEvent(new Event('input',   {bubbles: true}));
-        el.dispatchEvent(new Event('change',  {bubbles: true}));
-        el.dispatchEvent(new Event('blur',    {bubbles: true}));
-    """, username)
-
-    time.sleep(1)
-
-    # --- Step 2: Click Next button ---
-    next_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR,
-        "a.w-login-page-form-btn"
-    )))
-
-    print(f"✓ Found Next button: tag={next_btn.tag_name} "
-          f"id={next_btn.get_attribute('id')} "
-          f"class={next_btn.get_attribute('class')}")
-
-    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", next_btn)
-    time.sleep(0.5)
-
-    # Click the anchor tag via JS
-    driver.execute_script("arguments[0].click();", next_btn)
-    print("✓ Clicked Next button")
-
-    # --- Step 3: Wait for password field ---
-    # SAP dynamically injects the password field — wait for userid to go stale
-    # (meaning the DOM was replaced) then look for password
-    print("⏳ Waiting for page to transition...")
-    try:
-        # Wait for the username field to become stale (DOM replaced)
-        WebDriverWait(driver, 10).until(EC.staleness_of(username))
-        print("✓ DOM transitioned (username field gone)")
-    except:
-        print("⚠️ Username field did not go stale — trying direct password wait")
-
-    time.sleep(2)
-    driver.save_screenshot("/tmp/ariba_step2_after_username.png")
-    print("Post-click URL:", driver.current_url)
-
-    try:
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.XPATH, "//input[@type='password']"))
-        )
-        print("✓ Password field appeared")
-    except:
-        driver.save_screenshot("/tmp/ariba_no_password.png")
-        with open("/tmp/ariba_after_click.html", "w") as f:
-            f.write(driver.page_source)
-
-        inputs = driver.find_elements(By.XPATH, "//input")
-        print(f"Inputs found on page ({len(inputs)}):")
-        for inp in inputs:
-            print(f"  type={inp.get_attribute('type')} "
-                  f"name={inp.get_attribute('name')} "
-                  f"id={inp.get_attribute('id')} "
-                  f"visible={inp.is_displayed()}")
-
+    # Check if we're logged in (not redirected back to login page)
+    if "Authenticator" in driver.current_url or "ssoIDP" in driver.current_url:
         raise Exception(
-            f"Password field never appeared. URL={driver.current_url} "
-            "— check /tmp/ariba_no_password.png"
+            "Cookie session expired or invalid — redirected to login. "
+            "Please refresh your ariba_cookies.json."
         )
 
-    # --- Step 4: Enter password ---
-    password = driver.find_element(By.XPATH, "//input[@type='password']")
-    password.clear()
-    password.send_keys(ARIBA_PASSWORD)
-    password.send_keys(Keys.RETURN)
-    print("✓ Password submitted")
-
-    time.sleep(5)
-    print("Post-login URL:", driver.current_url)
-    driver.save_screenshot("/tmp/ariba_step3_post_login.png")
+    print("✓ Session restored via cookies")
 
 # ---------------- ARIBA SEARCH ---------------- #
 
