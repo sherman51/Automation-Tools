@@ -25,7 +25,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Chrome and ChromeDriver
-        uses: browser-actions/setup-chrome@latest  # pinned to @latest for auto version-matching
+        uses: browser-actions/setup-chrome@latest
 
       - name: Verify Chrome installation
         run: |
@@ -46,6 +46,9 @@ jobs:
           path: |
             /tmp/ariba_login_page.png
             /tmp/ariba_login_page.html
+            /tmp/ariba_before_login_click.png
+            /tmp/ariba_post_login.png
+            /tmp/ariba_post_login.html
             /tmp/ariba_no_password.png
             /tmp/ariba_after_click.html
             /tmp/ariba_step1_login_page.png
