@@ -1,10 +1,8 @@
 name: ALPS Sourcing Events Scraper
-
 on:
   schedule:
     - cron: "0 1 * * *"   # Runs daily at 1:00 AM UTC (9:00 AM Singapore time)
   workflow_dispatch:        # Also allows manual trigger from GitHub Actions tab
-
 jobs:
   scrape:
     runs-on: ubuntu-latest
@@ -16,21 +14,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Install Chrome and ChromeDriver
         uses: browser-actions/setup-chrome@v1
-
       - name: Run python main.py
         run: python main.py
-
       - name: Upload debug screenshots
         if: always()
         uses: actions/upload-artifact@v4
@@ -41,4 +34,13 @@ jobs:
             /tmp/ariba_step2_after_username.png
             /tmp/ariba_step2_after_username.html
             /tmp/ariba_step3_post_login.png
+            /tmp/ss_01_dashboard.png
+            /tmp/ss_02_typed_*.png
+            /tmp/ss_03_results_*.png
+            /tmp/ss_04_singapore_typed_*.png
+            /tmp/ss_04_singapore_error_*.png
+            /tmp/ss_05_singapore_filtered_*.png
+            /tmp/ss_06_done_*.png
+            /tmp/ariba_*.html
+          retention-days: 3
           if-no-files-found: ignore
