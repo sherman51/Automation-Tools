@@ -170,32 +170,29 @@ def ariba_login(driver, wait):
     # --- Step 1: Enter username ---
     username = wait.until(EC.presence_of_element_located((By.NAME, "userid")))
     username.clear()
-    username.send_keys(ARIBA_USERNAME)
+
+    # Type character by character to simulate real keystrokes
+    for char in ARIBA_USERNAME:
+        username.send_keys(char)
+        time.sleep(0.05)
+
     print("✓ Username entered")
     time.sleep(1)
 
-    # --- Step 2: Click Next button ---
-    # The clickable element is <a class="w-login-page-form-btn"> wrapping the visible Next span
-    next_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR,
-        "a.w-login-page-form-btn"
-    )))
+    # --- Step 2: Submit the form directly ---
+    # SAP POSTs back to the authenticator — submit the form containing userid
+    driver.execute_script("""
+        document.querySelector('input[name="userid"]').form.submit();
+    """)
+    print("✓ Form submitted")
 
-    print(f"✓ Found Next button: tag={next_btn.tag_name} "
-          f"id={next_btn.get_attribute('id')} "
-          f"class={next_btn.get_attribute('class')}")
-
-    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", next_btn)
-    time.sleep(0.5)
-    driver.execute_script("arguments[0].click();", next_btn)
-    print("✓ Clicked Next button")
-
-    # --- Step 3: Wait for password field ---
+    # --- Step 3: Wait for password field on new page ---
+    print("⏳ Waiting for password field...")
     time.sleep(3)
     driver.save_screenshot("/tmp/ariba_step2_after_username.png")
-    print("Post-click URL:", driver.current_url)
-    print("Post-click Title:", driver.title)
+    print("Post-submit URL:", driver.current_url)
+    print("Post-submit Title:", driver.title)
 
-    print("⏳ Waiting for password field...")
     try:
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.XPATH, "//input[@type='password']"))
