@@ -12,6 +12,7 @@ jobs:
       GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
       ARIBA_USERNAME: ${{ secrets.ARIBA_USERNAME }}
       ARIBA_PASSWORD: ${{ secrets.ARIBA_PASSWORD }}
+      ARIBA_COOKIES_JSON: ${{ secrets.ARIBA_COOKIES_JSON }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
