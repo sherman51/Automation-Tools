@@ -185,7 +185,12 @@ def build_driver(headless=True):
 
 def ariba_login(driver, wait):
     print("→ Opening Ariba login...")
-    driver.get(ARIBA_LOGIN_URL)
+
+    driver.delete_all_cookies()
+    driver.get("about:blank")
+    time.sleep(1)
+
+    driver.get("https://service.ariba.com/Authenticator.aw")
     time.sleep(5)
 
     print("URL:", driver.current_url)
@@ -195,79 +200,40 @@ def ariba_login(driver, wait):
     with open("/tmp/ariba_login_page.html", "w") as f:
         f.write(driver.page_source)
 
-    # ── Step 1: Enter username ──
-    username = wait.until(EC.presence_of_element_located((By.NAME, "userid")))
+    # ── Both username and password are on the same page ──
+
+    # Username field (placeholder: "Enter Username")
+    username = wait.until(EC.presence_of_element_located(
+        (By.XPATH, "//input[@placeholder='Enter Username' or @name='UserName' or @id='UserName']")
+    ))
     username.clear()
     username.send_keys(ARIBA_USERNAME)
     print("✓ Username entered")
 
-    # ── Step 2: Click Next ──
-    # The "Next" text may be in a child <span> inside the button,
-    # so we use contains() and also try JavaScript click as fallback
-    next_btn = None
-
-    # Try 1: button containing text "Next" anywhere inside it
-    try:
-        next_btn = wait.until(EC.presence_of_element_located(
-            (By.XPATH, "//button[contains(., 'Next')]")
-        ))
-        print(f"✓ Found Next button — displayed: {next_btn.is_displayed()}")
-    except Exception as e:
-        print(f"⚠️ Next button not found by text: {e}")
-
-    # Try 2: input[type=submit] with value "Next"
-    if not next_btn:
-        try:
-            next_btn = driver.find_element(
-                By.XPATH, "//input[@type='submit' and contains(@value,'Next')]"
-            )
-            print("✓ Found Next via input[type=submit]")
-        except:
-            pass
-
-    # Try 3: just send Enter on the username field — most reliable fallback
-    if not next_btn:
-        print("⚠️ Next button not found — sending ENTER on username field")
-        username.send_keys(Keys.RETURN)
-    else:
-        # Use JS click to bypass display/interactability issues
-        driver.execute_script("arguments[0].click();", next_btn)
-        print("✓ Clicked Next via JS")
-
-    # ── Step 3: Wait for password field ──
-    print("⏳ Waiting for password field...")
-    try:
-        wait.until(EC.presence_of_element_located(
-            (By.XPATH, "//input[@type='password']")
-        ))
-        print("✓ Password field appeared")
-    except:
-        driver.save_screenshot("/tmp/ariba_no_password.png")
-        with open("/tmp/ariba_after_click.html", "w") as f:
-            f.write(driver.page_source)
-        raise Exception("Password field never appeared")
-
-    # ── Step 4: Enter password and submit ──
-    password = driver.find_element(By.XPATH, "//input[@type='password']")
+    # Password field (placeholder: "Enter Password")
+    password = wait.until(EC.presence_of_element_located(
+        (By.XPATH, "//input[@placeholder='Enter Password' or @type='password']")
+    ))
+    password.clear()
     password.send_keys(ARIBA_PASSWORD)
     print("✓ Password entered")
 
-    # Click "Sign in" button
+    # Login button
     try:
-        signin_btn = driver.find_element(
-            By.XPATH, "//button[contains(., 'Sign in') or contains(., 'Sign In')]"
+        login_btn = driver.find_element(
+            By.XPATH, "//input[@value='Login' or @type='submit'] | //button[contains(., 'Login')]"
         )
-        driver.execute_script("arguments[0].click();", signin_btn)
-        print("✓ Clicked Sign in via JS")
+        driver.execute_script("arguments[0].click();", login_btn)
+        print("✓ Clicked Login button")
     except:
-        print("⚠️ Sign in button not found — sending ENTER on password field")
+        print("⚠️ Login button not found — sending ENTER")
         password.send_keys(Keys.RETURN)
 
-    print("✓ Login submitted")
     time.sleep(5)
 
     driver.save_screenshot("/tmp/ariba_post_login.png")
     print("Post-login URL:", driver.current_url)
+    print("Post-login Title:", driver.title)
 
 # ---------------- ARIBA SEARCH ---------------- #
 
