@@ -171,27 +171,53 @@ def ariba_login(driver, wait):
     username = wait.until(EC.presence_of_element_located((By.NAME, "userid")))
     username.clear()
 
-    # Type character by character to simulate real keystrokes
+    # Type character by character to trigger SAP's JS listeners
     for char in ARIBA_USERNAME:
         username.send_keys(char)
         time.sleep(0.05)
 
     print("✓ Username entered")
+
+    # Trigger change/blur events so SAP's form JS recognises the value
+    driver.execute_script("""
+        var el = arguments[0];
+        el.dispatchEvent(new Event('input',   {bubbles: true}));
+        el.dispatchEvent(new Event('change',  {bubbles: true}));
+        el.dispatchEvent(new Event('blur',    {bubbles: true}));
+    """, username)
+
     time.sleep(1)
 
-    # --- Step 2: Submit the form directly ---
-    # SAP POSTs back to the authenticator — submit the form containing userid
-    driver.execute_script("""
-        document.querySelector('input[name="userid"]').form.submit();
-    """)
-    print("✓ Form submitted")
+    # --- Step 2: Click Next button ---
+    next_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR,
+        "a.w-login-page-form-btn"
+    )))
 
-    # --- Step 3: Wait for password field on new page ---
-    print("⏳ Waiting for password field...")
-    time.sleep(3)
+    print(f"✓ Found Next button: tag={next_btn.tag_name} "
+          f"id={next_btn.get_attribute('id')} "
+          f"class={next_btn.get_attribute('class')}")
+
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", next_btn)
+    time.sleep(0.5)
+
+    # Click the anchor tag via JS
+    driver.execute_script("arguments[0].click();", next_btn)
+    print("✓ Clicked Next button")
+
+    # --- Step 3: Wait for password field ---
+    # SAP dynamically injects the password field — wait for userid to go stale
+    # (meaning the DOM was replaced) then look for password
+    print("⏳ Waiting for page to transition...")
+    try:
+        # Wait for the username field to become stale (DOM replaced)
+        WebDriverWait(driver, 10).until(EC.staleness_of(username))
+        print("✓ DOM transitioned (username field gone)")
+    except:
+        print("⚠️ Username field did not go stale — trying direct password wait")
+
+    time.sleep(2)
     driver.save_screenshot("/tmp/ariba_step2_after_username.png")
-    print("Post-submit URL:", driver.current_url)
-    print("Post-submit Title:", driver.title)
+    print("Post-click URL:", driver.current_url)
 
     try:
         WebDriverWait(driver, 20).until(
