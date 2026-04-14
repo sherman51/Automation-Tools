@@ -258,144 +258,74 @@ def ariba_login(driver, wait):
 # ---------------- ARIBA SEARCH (BULK) ---------------- #
 
 def ariba_search_all_rfps(driver, wait, rfps):
-    print("→ Navigating to Discovery page...")
-    driver.get("https://service.ariba.com/Discovery.aw")
-    time.sleep(4)
+    all_results = []
+    seen = set()  # ← deduplicate
 
-    driver.save_screenshot("/tmp/ariba_discovery.png")
-    with open("/tmp/ariba_discovery.html", "w") as f:
-        f.write(driver.page_source)
-
-    # ── Dismiss cookie banner if present ──
-    try:
-        understood_btn = WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable((By.XPATH, "//button[contains(text(),'Understood')]"))
-        )
-        driver.execute_script("arguments[0].click();", understood_btn)
-        print("✓ Dismissed cookie banner")
-        time.sleep(1)
-    except:
-        pass
-
-    # ── Dismiss update notification if present ──
-    try:
-        close_notif = driver.find_element(By.XPATH, "//button[@aria-label='Close' or contains(@class,'close')]")
-        driver.execute_script("arguments[0].click();", close_notif)
-        print("✓ Dismissed notification banner")
-        time.sleep(1)
-    except:
-        pass
-
-    # ── Type GPOR into search bar and submit ──
-    try:
-        search_box = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.XPATH,
-                "//input[@placeholder='By Product' or contains(@placeholder,'Product') or contains(@aria-label,'Product')]"
-            ))
-        )
-        search_box.clear()
-        search_box.send_keys("GPOR")
-        print("✓ Typed GPOR into search bar")
-        time.sleep(1)
-        search_box.send_keys(Keys.RETURN)
-        print("✓ Search submitted")
-    except Exception as e:
-        print(f"⚠️ Search box not found: {e}")
-        return []
-
-    # ── Wait for results to fully load (spinner to disappear) ──
-    print("⏳ Waiting for results to load...")
-    try:
-        # Wait until the loading spinner is gone
-        WebDriverWait(driver, 30).until_not(
-            EC.presence_of_element_located((By.XPATH,
-                "//*[contains(@class,'loading') or contains(@class,'spinner') or contains(@class,'dots')]"
-            ))
-        )
-        print("✓ Spinner gone")
-    except:
-        print("→ Spinner wait timed out, continuing anyway...")
-
-    # Extra buffer for JS rendering
-    time.sleep(5)
-
-    driver.save_screenshot("/tmp/ariba_results_all.png")
-    with open("/tmp/ariba_results_all.html", "w") as f:
-        f.write(driver.page_source)
-
-    # ── Read rendered DOM via Selenium (not BeautifulSoup) ──
-    # Get all visible text rows from the page
-    results = []
-
-    try:
-        # Wait for at least one result row to appear
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.XPATH, "//tr | //li[contains(@class,'result') or contains(@class,'lead')]"))
-        )
-    except:
-        print("⚠️ No result rows found on page")
-
-    # Parse with BeautifulSoup now that JS has rendered
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-
-    # Try tables first
-    tables = soup.find_all("table")
-    print(f"  Found {len(tables)} tables on results page")
-
-    for table in tables:
-        rows = table.find_all("tr")
-        for row in rows:
-            cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-            if not cells:
-                continue
-            row_text = " ".join(cells).upper().replace(" ", "")
-
-            for rfp in rfps:
-                if rfp.replace(" ", "").upper() in row_text:
-                    results.append({
-                        "RFP No.":    rfp,
-                        "Lead Title": cells[0] if len(cells) > 0 else "",
-                        "Status":     cells[1] if len(cells) > 1 else "",
-                        "Close Date": cells[2] if len(cells) > 2 else "",
-                        "Ariba URL":  driver.current_url
-                    })
-                    print(f"  ✓ Matched {rfp}: {cells}")
-                    break
-
-    # If tables yielded nothing, try div/li based results (some Ariba pages use cards)
-    if not results:
-        print("  → No table matches, trying card/list layout...")
-        cards = soup.find_all(["li", "div"], class_=re.compile(r'result|lead|row|item', re.I))
-        print(f"  Found {len(cards)} cards")
-        for card in cards:
-            card_text = card.get_text(separator=" ", strip=True)
-            card_text_clean = card_text.upper().replace(" ", "")
-            for rfp in rfps:
-                if rfp.replace(" ", "").upper() in card_text_clean:
-                    results.append({
-                        "RFP No.":    rfp,
-                        "Lead Title": card_text[:200],
-                        "Status":     "",
-                        "Close Date": "",
-                        "Ariba URL":  driver.current_url
-                    })
-                    print(f"  ✓ Matched {rfp} in card: {card_text[:100]}")
-                    break
-
-    # ── Mark any unmatched RFPs as not found ──
-    found = set(r["RFP No."] for r in results)
     for rfp in rfps:
-        if rfp not in found:
-            print(f"  ⚠️ {rfp} not found in search results")
-            results.append({
+        print(f"→ Searching for {rfp}...")
+        driver.get("https://service.ariba.com/Discovery.aw")
+        time.sleep(3)
+
+        # Dismiss banners (same as before)...
+
+        try:
+            search_box = WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.XPATH,
+                    "//input[contains(@placeholder,'Product') or contains(@aria-label,'Product')]"
+                ))
+            )
+            search_box.clear()
+            search_box.send_keys(rfp)  # ← search the specific RFP, not "GPOR"
+            search_box.send_keys(Keys.RETURN)
+        except Exception as e:
+            print(f"⚠️ Search box not found for {rfp}: {e}")
+            continue
+
+        time.sleep(5)  # wait for results
+
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+
+        # ── Target the specific lead card title element, not entire card blobs ──
+        lead_titles = soup.find_all(
+            ["h2", "h3", "span", "div"],
+            string=re.compile(re.escape(rfp), re.IGNORECASE)
+        )
+
+        matched = False
+        for el in lead_titles:
+            card = el.find_parent(
+                lambda tag: tag.name in ["li", "div"] and
+                any(c in (tag.get("class") or []) for c in ["lead", "result", "item", "card"])
+            )
+            text = card.get_text(" ", strip=True) if card else el.get_text(" ", strip=True)
+
+            dedup_key = (rfp, text[:80])
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            # Extract close/deadline date with regex
+            deadline = re.search(r'(?:Respond By|Close Date)[:\s]+([A-Za-z]+\s\d{1,2},?\s\d{4})', text)
+
+            all_results.append({
                 "RFP No.":    rfp,
-                "Lead Title": "Not found in search results",
+                "Lead Title": re.sub(r'\s+', ' ', text[:120]),  # clean whitespace
+                "Status":     "RFI",
+                "Close Date": deadline.group(1) if deadline else "",
+                "Ariba URL":  driver.current_url
+            })
+            matched = True
+
+        if not matched:
+            all_results.append({
+                "RFP No.":    rfp,
+                "Lead Title": "Not found",
                 "Status":     "",
                 "Close Date": "",
                 "Ariba URL":  driver.current_url
             })
 
-    return results
+    return all_results
 
 # ---------------- MAIN ---------------- #
 
