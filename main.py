@@ -266,7 +266,27 @@ def ariba_search_all_rfps(driver, wait, rfps):
     with open("/tmp/ariba_discovery.html", "w") as f:
         f.write(driver.page_source)
 
-    # ── Search by common prefix "GPOR" to get all results at once ──
+    # ── Dismiss cookie banner if present ──
+    try:
+        understood_btn = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.XPATH, "//button[contains(text(),'Understood')]"))
+        )
+        driver.execute_script("arguments[0].click();", understood_btn)
+        print("✓ Dismissed cookie banner")
+        time.sleep(1)
+    except:
+        pass
+
+    # ── Dismiss update notification if present ──
+    try:
+        close_notif = driver.find_element(By.XPATH, "//button[@aria-label='Close' or contains(@class,'close')]")
+        driver.execute_script("arguments[0].click();", close_notif)
+        print("✓ Dismissed notification banner")
+        time.sleep(1)
+    except:
+        pass
+
+    # ── Type GPOR into search bar and submit ──
     try:
         search_box = WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.XPATH,
@@ -283,16 +303,45 @@ def ariba_search_all_rfps(driver, wait, rfps):
         print(f"⚠️ Search box not found: {e}")
         return []
 
+    # ── Wait for results to fully load (spinner to disappear) ──
+    print("⏳ Waiting for results to load...")
+    try:
+        # Wait until the loading spinner is gone
+        WebDriverWait(driver, 30).until_not(
+            EC.presence_of_element_located((By.XPATH,
+                "//*[contains(@class,'loading') or contains(@class,'spinner') or contains(@class,'dots')]"
+            ))
+        )
+        print("✓ Spinner gone")
+    except:
+        print("→ Spinner wait timed out, continuing anyway...")
+
+    # Extra buffer for JS rendering
     time.sleep(5)
+
     driver.save_screenshot("/tmp/ariba_results_all.png")
     with open("/tmp/ariba_results_all.html", "w") as f:
         f.write(driver.page_source)
 
-    # ── Extract all result rows from the page ──
-    soup = BeautifulSoup(driver.page_source, "html.parser")
+    # ── Read rendered DOM via Selenium (not BeautifulSoup) ──
+    # Get all visible text rows from the page
     results = []
 
+    try:
+        # Wait for at least one result row to appear
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.XPATH, "//tr | //li[contains(@class,'result') or contains(@class,'lead')]"))
+        )
+    except:
+        print("⚠️ No result rows found on page")
+
+    # Parse with BeautifulSoup now that JS has rendered
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+
+    # Try tables first
     tables = soup.find_all("table")
+    print(f"  Found {len(tables)} tables on results page")
+
     for table in tables:
         rows = table.find_all("tr")
         for row in rows:
@@ -301,23 +350,39 @@ def ariba_search_all_rfps(driver, wait, rfps):
                 continue
             row_text = " ".join(cells).upper().replace(" ", "")
 
-            matched_rfp = None
             for rfp in rfps:
                 if rfp.replace(" ", "").upper() in row_text:
-                    matched_rfp = rfp
+                    results.append({
+                        "RFP No.":    rfp,
+                        "Lead Title": cells[0] if len(cells) > 0 else "",
+                        "Status":     cells[1] if len(cells) > 1 else "",
+                        "Close Date": cells[2] if len(cells) > 2 else "",
+                        "Ariba URL":  driver.current_url
+                    })
+                    print(f"  ✓ Matched {rfp}: {cells}")
                     break
 
-            if matched_rfp:
-                results.append({
-                    "RFP No.":    matched_rfp,
-                    "Lead Title": cells[0] if len(cells) > 0 else "",
-                    "Status":     cells[1] if len(cells) > 1 else "",
-                    "Close Date": cells[2] if len(cells) > 2 else "",
-                    "Ariba URL":  driver.current_url
-                })
-                print(f"  ✓ Matched {matched_rfp}: {cells}")
+    # If tables yielded nothing, try div/li based results (some Ariba pages use cards)
+    if not results:
+        print("  → No table matches, trying card/list layout...")
+        cards = soup.find_all(["li", "div"], class_=re.compile(r'result|lead|row|item', re.I))
+        print(f"  Found {len(cards)} cards")
+        for card in cards:
+            card_text = card.get_text(separator=" ", strip=True)
+            card_text_clean = card_text.upper().replace(" ", "")
+            for rfp in rfps:
+                if rfp.replace(" ", "").upper() in card_text_clean:
+                    results.append({
+                        "RFP No.":    rfp,
+                        "Lead Title": card_text[:200],
+                        "Status":     "",
+                        "Close Date": "",
+                        "Ariba URL":  driver.current_url
+                    })
+                    print(f"  ✓ Matched {rfp} in card: {card_text[:100]}")
+                    break
 
-    # ── For any RFPs not found in results, add a not-found row ──
+    # ── Mark any unmatched RFPs as not found ──
     found = set(r["RFP No."] for r in results)
     for rfp in rfps:
         if rfp not in found:
