@@ -217,12 +217,18 @@ def ariba_login(driver, wait):
 
 # ---------------- ARIBA SEARCH ---------------- #
 
+def screenshot(driver, name):
+    path = f"/tmp/ss_{name}.png"
+    driver.save_screenshot(path)
+    print(f"  📸 Screenshot saved: {path}")
+
 def ariba_search_rfp(driver, wait, rfp_no):
     print(f"Searching {rfp_no}")
 
     # Navigate to dashboard
     driver.get("https://portal.us.bn.cloud.ariba.com/dashboard/")
     time.sleep(3)
+    screenshot(driver, "01_dashboard")
 
     # Step 1: Type RFP number into the "By Product" search box
     search_input = wait.until(
@@ -233,10 +239,13 @@ def ariba_search_rfp(driver, wait, rfp_no):
     time.sleep(1)
     search_input.send_keys(rfp_no)
     time.sleep(1)
-    search_input.send_keys(Keys.RETURN)
-    time.sleep(4)  # Wait for results page to load
+    screenshot(driver, f"02_typed_{rfp_no.replace(' ', '_')}")
 
-    # Step 2: Filter by Singapore in the location multi-input
+    search_input.send_keys(Keys.RETURN)
+    time.sleep(4)
+    screenshot(driver, f"03_results_{rfp_no.replace(' ', '_')}")
+
+    # Step 2: Type Singapore and hit Enter in the location filter
     try:
         location_input = wait.until(
             EC.presence_of_element_located((By.ID, "__xmlview1--idLocationFilterMultiInput-inner"))
@@ -244,33 +253,33 @@ def ariba_search_rfp(driver, wait, rfp_no):
         location_input.click()
         time.sleep(1)
         location_input.send_keys("Singapore")
-        time.sleep(2)  # Wait for dropdown suggestions to appear
+        time.sleep(1)
+        screenshot(driver, f"04_singapore_typed_{rfp_no.replace(' ', '_')}")
 
-        # Select the first suggestion from the SAP UI dropdown
-        suggestion = wait.until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, ".sapMSuggestionItem, [class*='suggestion'], [class*='popover'] li"))
-        )
-        suggestion.click()
-        time.sleep(3)  # Wait for filtered results
+        location_input.send_keys(Keys.RETURN)
+        time.sleep(3)
+        screenshot(driver, f"05_singapore_filtered_{rfp_no.replace(' ', '_')}")
 
     except Exception as e:
         print(f"  ⚠️ Could not apply Singapore filter: {e}")
+        screenshot(driver, f"04_singapore_error_{rfp_no.replace(' ', '_')}")
 
-    # DEBUG: save page for inspection (remove once working)
+    # Save HTML for inspection
     with open(f"/tmp/ariba_{rfp_no.replace(' ', '_')}.html", "w") as f:
         f.write(driver.page_source)
+    print(f"  💾 HTML saved: /tmp/ariba_{rfp_no.replace(' ', '_')}.html")
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
 
     # Step 3: Extract lead titles from results
     lead_title = ""
     for selector in [
-        "[class*='sapMLnk']",         # SAP UI5 link elements
+        "[class*='sapMLnk']",
         "[class*='title']",
         "[class*='rfx-name']",
         "[class*='leadTitle']",
         "[class*='itemTitle']",
-        ".sapMListTblCell",            # SAP table cells
+        ".sapMListTblCell",
         "[class*='result'] td",
         "h1", "h2", "h3",
     ]:
@@ -281,6 +290,7 @@ def ariba_search_rfp(driver, wait, rfp_no):
                 lead_title = text
                 break
 
+    screenshot(driver, f"06_done_{rfp_no.replace(' ', '_')}")
     print(f"  → Title: {lead_title}")
 
     return {
