@@ -267,16 +267,6 @@ def ariba_search_all_rfps(driver, wait, rfps):
                 EC.element_to_be_clickable((By.XPATH, "//button[contains(text(),'Understood')]"))
             )
             driver.execute_script("arguments[0].click();", understood_btn)
-            print("✓ Dismissed cookie banner")
-            time.sleep(1)
-        except:
-            pass
-
-        # Dismiss notification banner if present
-        try:
-            close_notif = driver.find_element(By.XPATH, "//button[@aria-label='Close' or contains(@class,'close')]")
-            driver.execute_script("arguments[0].click();", close_notif)
-            print("✓ Dismissed notification banner")
             time.sleep(1)
         except:
             pass
@@ -290,72 +280,86 @@ def ariba_search_all_rfps(driver, wait, rfps):
             )
             search_box.clear()
             search_box.send_keys(rfp)
-            print(f"✓ Typed {rfp} into search bar")
             time.sleep(1)
             search_box.send_keys(Keys.RETURN)
-            print("✓ Search submitted")
+            print(f"✓ Search submitted for {rfp}")
         except Exception as e:
             print(f"⚠️ Search box not found for {rfp}: {e}")
-            all_results.append({
-                "RFI ID":     "",
-                "GPOR No.":   rfp,
-                "Lead Title": "Search box not found",
-                "Respond By": "",
-                "URL":        ""
-            })
+            all_results.append({"RFI ID": "", "Lead Title": "Search box not found", "Respond By": "", "URL": ""})
             continue
 
-        # Wait for spinner to disappear
-        print("⏳ Waiting for results to load...")
-        try:
-            WebDriverWait(driver, 30).until_not(
-                EC.presence_of_element_located((By.XPATH,
-                    "//*[contains(@class,'loading') or contains(@class,'spinner') or contains(@class,'dots')]"
-                ))
-            )
-            print("✓ Spinner gone")
-        except:
-            print("→ Spinner wait timed out, continuing anyway...")
-
+        # Wait for results
         time.sleep(5)
 
         soup = BeautifulSoup(driver.page_source, "html.parser")
 
-        # Find all lead cards — try li/div with result-like classes
-        cards = soup.find_all(
-            ["li", "div"],
-            class_=re.compile(r'result|lead|row|item|card', re.I)
+        # ── Target result cards specifically by looking for the GPOR title link ──
+        # Each card has a prominent <a> or <h2>/<h3> with the GPOR title
+        # We find those anchors and then walk UP to the card container
+        matched = False
+
+        title_elements = soup.find_all(
+            lambda tag: tag.name in ["a", "h2", "h3", "span", "div"]
+            and rfp.upper() in tag.get_text(strip=True).upper()
+            and len(tag.get_text(strip=True)) < 100  # exclude large containers
         )
 
-        matched = False
-        for card in cards:
+        for title_el in title_elements:
+            # Walk up to find the card container — stop at a sizeable parent
+            card = title_el
+            for _ in range(6):  # walk up max 6 levels
+                parent = card.find_parent()
+                if not parent:
+                    break
+                parent_text = parent.get_text(separator=" ", strip=True)
+                # Stop when we have enough context (has RFI ID + Respond By fields)
+                if re.search(r'RF[A-Z]\s*[·•]', parent_text) and 'Respond By' in parent_text:
+                    card = parent
+                    break
+                card = parent
+
             card_text = re.sub(r'\s+', ' ', card.get_text(separator=" ", strip=True))
 
-            # Only process cards that contain this specific RFP number
-            if rfp.upper() not in card_text.upper():
-                continue
-
-            dedup_key = (rfp, card_text[:80])
+            dedup_key = card_text[:80]
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
 
-            # Extract RFI ID — anchored on "RF_ ·" label, not a hardcoded number pattern
+            # Extract RFI ID — anchored on "RFI ·" label
             rfi_id_match = re.search(r'RF[A-Z]\s*[·•]\s*(\S+)', card_text)
             rfi_id = rfi_id_match.group(1) if rfi_id_match else ""
 
-            # Extract lead title — first line of card text up to the RFI/RFQ/RFP marker
+            # Extract Lead Title — text before "RFI ·"
             title_match = re.match(r'^(.+?)\s+RF[A-Z]\s*[·•]', card_text)
-            lead_title = title_match.group(1).strip() if title_match else card_text[:80]
+            lead_title = title_match.group(1).strip() if title_match else title_el.get_text(strip=True)
 
-            # Extract Respond By date — matches "17 Apr 2026, 12:00:00" style
-            deadline_match = re.search(
-                r'Respond\s+By[:\s]+(\d{1,2}\s+[A-Za-z]{3}\s+\d{4}[,\s]*[\d:]*)',
-                card_text
+            # ── Extract Respond By from sibling/adjacent elements ──
+            # Look for the label and grab the NEXT sibling text node or element
+            respond_by = ""
+
+            # Try finding "Respond By" label element, then get adjacent value
+            respond_label = card.find(
+                lambda tag: tag.get_text(strip=True) in ["Respond By:", "Respond By"]
             )
-            respond_by = deadline_match.group(1).strip() if deadline_match else ""
+            if respond_label:
+                # Try next sibling
+                sibling = respond_label.find_next_sibling()
+                if sibling:
+                    respond_by = sibling.get_text(strip=True)
+                # If no sibling, try parent's next sibling
+                if not respond_by and respond_label.parent:
+                    next_parent = respond_label.parent.find_next_sibling()
+                    if next_parent:
+                        respond_by = next_parent.get_text(strip=True)
 
-            # Build direct preview URL using RFI ID
+            # Fallback: regex on full card text
+            if not respond_by:
+                deadline_match = re.search(
+                    r'Respond\s+By[:\s]+(\d{1,2}\s+[A-Za-z]{3}\s+\d{4}[\s,]*[\d:]*)',
+                    card_text
+                )
+                respond_by = deadline_match.group(1).strip() if deadline_match else ""
+
             url = (
                 f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/"
                 f"comsapsbncdiscoveryui#/RfxEvent/preview/{rfi_id}"
@@ -364,19 +368,18 @@ def ariba_search_all_rfps(driver, wait, rfps):
 
             all_results.append({
                 "RFI ID":     rfi_id,
-                "GPOR No.":   rfp,
                 "Lead Title": lead_title,
                 "Respond By": respond_by,
                 "URL":        url
             })
-            print(f"  ✓ Matched {rfp} → RFI ID: {rfi_id}, Respond By: {respond_by}")
+            print(f"  ✓ {rfp} → RFI ID: {rfi_id}, Respond By: {respond_by}")
             matched = True
+            break  # one result per RFP search — take the first/best match
 
         if not matched:
-            print(f"  ⚠️ {rfp} not found in search results")
+            print(f"  ⚠️ {rfp} not found")
             all_results.append({
                 "RFI ID":     "",
-                "GPOR No.":   rfp,
                 "Lead Title": "Not found",
                 "Respond By": "",
                 "URL":        ""
