@@ -401,10 +401,9 @@ def clean_tender_data(results):
 
     cleaned = [r for r in results if not is_junk(r.get("Lead Title", ""))]
 
-    # Deduplicate — one row per RFI ID, prefer real matches over "Not found"
     best = {}
     for row in cleaned:
-        key = row["RFI ID"] or row["GPOR No."]  # fall back to GPOR if no RFI ID yet
+        key = row["RFI ID"] or row["Lead Title"]
         existing = best.get(key)
         if existing is None:
             best[key] = row
