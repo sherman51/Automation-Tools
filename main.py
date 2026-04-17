@@ -140,6 +140,17 @@ def check_ariba_reachable():
         print(f"✗ Ariba not reachable: {e}")
         return False
 
+def get_keywords_from_sheet(spreadsheet):
+    try:
+        ws = spreadsheet.worksheet("KEYWORDS")
+        records = ws.get_all_records()
+        keywords = [row["keywords"] for row in records if row.get("keywords", "").strip()]
+        print(f"✓ Loaded {len(keywords)} keywords from KEYWORDS sheet")
+        return keywords
+    except Exception as e:
+        print(f"⚠️ Could not load KEYWORDS sheet: {e}")
+        return []
+
 # ---------------- SELENIUM ---------------- #
 
 def build_driver(headless=True):
@@ -418,7 +429,12 @@ def main():
     rfps = extract_rfp_numbers(pharma_data)
     print("RFPs found:", rfps)
 
-    tender_data = run_ariba_search(rfps)
+    # ── NEW: merge sheet keywords into search terms ──
+    sheet_keywords = get_keywords_from_sheet(sheet)
+    all_search_terms = list(dict.fromkeys(rfps + sheet_keywords))  # deduplicated, order-preserved
+    print("All search terms:", all_search_terms)
+
+    tender_data = run_ariba_search(all_search_terms)
 
     if tender_data:
         tender_data = clean_tender_data(tender_data)
