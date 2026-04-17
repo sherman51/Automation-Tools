@@ -151,7 +151,7 @@ def get_keywords_from_sheet(spreadsheet):
         print(f"⚠️ Could not load KEYWORDS sheet: {e}")
         return []
 
-# ---------------- SIMPLE RELEVANCE FILTER ---------------- #
+# ---------------- FILTER ---------------- #
 
 def filter_relevant_leads(leads, keywords):
     if not leads:
@@ -177,7 +177,7 @@ def filter_relevant_leads(leads, keywords):
     print(f"✓ Keyword filter: {len(leads)} → {len(filtered)} relevant")
     return filtered
 
-# ---------------- ARIBA CHECK ---------------- #
+# ---------------- ARIBA ---------------- #
 
 def check_ariba_reachable():
     try:
@@ -187,8 +187,6 @@ def check_ariba_reachable():
     except Exception as e:
         print(f"✗ Ariba not reachable: {e}")
         return False
-
-# ---------------- SELENIUM SETUP ---------------- #
 
 def build_driver(headless=True):
     options = Options()
@@ -202,8 +200,6 @@ def build_driver(headless=True):
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=options)
 
-# ---------------- ARIBA LOGIN ---------------- #
-
 def ariba_login(driver, wait):
     driver.get("https://service.ariba.com/Authenticator.aw")
 
@@ -216,43 +212,93 @@ def ariba_login(driver, wait):
 
     time.sleep(5)
 
-# ---------------- ARIBA SEARCH ---------------- #
+def scroll_to_load_all(driver):
+    last_count = 0
+    stale_scrolls = 0
 
-def ariba_search_all_rfps(driver, search_terms):
-    encoded = "%20".join(search_terms)
-    url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/leads/search?commodityName={encoded}"
+    while stale_scrolls < 4:
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
 
-    driver.get(url)
-    time.sleep(5)
+        driver.execute_script("""
+            let containers = document.querySelectorAll('[class*="scroll"], [class*="list"], [class*="results"]');
+            containers.forEach(el => el.scrollTop = el.scrollHeight);
+        """)
+        time.sleep(1)
 
-    soup = BeautifulSoup(driver.page_source, "html.parser")
+        current_count = driver.execute_script("""
+            return document.querySelectorAll('[class*="card"], [class*="lead"], [class*="result"]').length
+        """)
 
+        if current_count == last_count:
+            stale_scrolls += 1
+        else:
+            stale_scrolls = 0
+            last_count = current_count
+
+def parse_cards(soup, search_terms):
     results = []
-    for el in soup.find_all(text=re.compile("GPOR")):
-        text = el.strip()
+    seen_rfi_ids = set()
+
+    title_elements = soup.find_all(
+        lambda tag: tag.name in ["a","h2","h3","span","div"]
+        and re.search(r'GPOR\s*\d+', tag.get_text(strip=True), re.IGNORECASE)
+        and len(tag.get_text(strip=True)) < 100
+    )
+
+    for title_el in title_elements:
+        card = title_el
+
+        for _ in range(6):
+            parent = card.find_parent()
+            if not parent:
+                break
+            parent_text = parent.get_text(" ", strip=True)
+            if re.search(r'RF[A-Z]\s*[·•]', parent_text) and 'Respond By' in parent_text:
+                card = parent
+                break
+            card = parent
+
+        text = re.sub(r'\s+', ' ', card.get_text(" ", strip=True))
+
+        rfi_match = re.search(r'RF[A-Z]\s*[·•]\s*(\S+)', text)
+        rfi_id = rfi_match.group(1) if rfi_match else ""
+
+        if rfi_id in seen_rfi_ids:
+            continue
+        seen_rfi_ids.add(rfi_id)
+
+        title_match = re.match(r'^(.+?)\s+RF[A-Z]', text)
+        title = title_match.group(1) if title_match else title_el.get_text(strip=True)
+
+        deadline_match = re.search(r'Respond\s+By[:\s]*(.*)', text)
+        deadline = deadline_match.group(1) if deadline_match else ""
+
+        url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/RfxEvent/preview/{rfi_id}" if rfi_id else ""
+
+        matched_term = next((t for t in search_terms if t.lower() in text.lower()), "")
+
         results.append({
-            "RFI ID": "",
-            "Lead Title": text,
-            "Respond By": "",
-            "URL": "",
-            "Matched Term": ""
+            "RFI ID": rfi_id,
+            "Lead Title": title,
+            "Respond By": deadline,
+            "URL": url,
+            "Matched Term": matched_term
         })
 
     return results
 
-# ---------------- CLEAN ---------------- #
+def ariba_search_all_rfps(driver, wait, search_terms):
+    encoded = "%20".join(search_terms)
+    url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/leads/search?commodityName={encoded}"
 
-def clean_tender_data(results):
-    seen = set()
-    cleaned = []
+    driver.get(url)
+    time.sleep(3)
 
-    for r in results:
-        key = r["Lead Title"]
-        if key not in seen:
-            seen.add(key)
-            cleaned.append(r)
+    scroll_to_load_all(driver)
 
-    return cleaned
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    return parse_cards(soup, search_terms)
 
 # ---------------- MAIN ---------------- #
 
@@ -265,7 +311,7 @@ def run_ariba_search(search_terms):
 
     try:
         ariba_login(driver, wait)
-        results = ariba_search_all_rfps(driver, search_terms)
+        results = ariba_search_all_rfps(driver, wait, search_terms)
     finally:
         driver.quit()
 
@@ -291,7 +337,6 @@ def main():
     tender_data = run_ariba_search(all_search_terms)
 
     if tender_data:
-        tender_data = clean_tender_data(tender_data)
         tender_data = filter_relevant_leads(tender_data, keywords)
 
         write_to_sheet(
