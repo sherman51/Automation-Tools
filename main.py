@@ -240,42 +240,41 @@ def parse_cards(soup, search_terms):
     results = []
     seen_rfi_ids = set()
 
-    title_elements = soup.find_all(
-        lambda tag: tag.name in ["a","h2","h3","span","div"]
-        and re.search(r'GPOR\s*\d+', tag.get_text(strip=True), re.IGNORECASE)
-        and len(tag.get_text(strip=True)) < 100
+    # Target RFI ID spans/links directly — they're short and unique
+    rfi_id_elements = soup.find_all(
+        lambda tag: tag.name in ["span", "div", "a"]
+        and re.fullmatch(r'\d{10}', tag.get_text(strip=True))  # Ariba RFI IDs are 10-digit
     )
 
-    for title_el in title_elements:
-        card = title_el
+    for id_el in rfi_id_elements:
+        rfi_id = id_el.get_text(strip=True)
+        if rfi_id in seen_rfi_ids:
+            continue
+        seen_rfi_ids.add(rfi_id)
 
-        for _ in range(6):
+        # Walk up to the card container
+        card = id_el
+        for _ in range(8):
             parent = card.find_parent()
             if not parent:
                 break
             parent_text = parent.get_text(" ", strip=True)
-            if re.search(r'RF[A-Z]\s*[·•]', parent_text) and 'Respond By' in parent_text:
+            # Stop when we have a self-contained card (has title + deadline)
+            if 'Respond By' in parent_text and len(parent_text) < 2000:
                 card = parent
                 break
             card = parent
 
         text = re.sub(r'\s+', ' ', card.get_text(" ", strip=True))
 
-        rfi_match = re.search(r'RF[A-Z]\s*[·•]\s*(\S+)', text)
-        rfi_id = rfi_match.group(1) if rfi_match else ""
+        # Extract title — everything before "RFI" or the RFI ID
+        title_match = re.match(r'^(.+?)\s+(?:RFI|RF[A-Z])\b', text)
+        title = title_match.group(1).strip() if title_match else text[:80]
 
-        if rfi_id in seen_rfi_ids:
-            continue
-        seen_rfi_ids.add(rfi_id)
+        deadline_match = re.search(r'Respond\s+By[:\s]*([\w,: ]+(?:AM|PM))', text)
+        deadline = deadline_match.group(1).strip() if deadline_match else ""
 
-        title_match = re.match(r'^(.+?)\s+RF[A-Z]', text)
-        title = title_match.group(1) if title_match else title_el.get_text(strip=True)
-
-        deadline_match = re.search(r'Respond\s+By[:\s]*(.*)', text)
-        deadline = deadline_match.group(1) if deadline_match else ""
-
-        url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/RfxEvent/preview/{rfi_id}" if rfi_id else ""
-
+        url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/RfxEvent/preview/{rfi_id}"
         matched_term = next((t for t in search_terms if t.lower() in text.lower()), "")
 
         results.append({
