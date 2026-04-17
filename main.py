@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+
 from google.oauth2.service_account import Credentials
 
 from selenium import webdriver
@@ -129,7 +130,54 @@ def write_to_sheet(sheet, data):
     rows = [headers] + [[row.get(h, "") for h in headers] for row in data]
     sheet.update(rows)
 
-# ---------------- ARIBA REACHABILITY CHECK ---------------- #
+# ---------------- KEYWORDS ---------------- #
+
+def get_keywords_from_sheet(spreadsheet):
+    try:
+        ws = spreadsheet.worksheet("KEYWORDS")
+        records = ws.get_all_records()
+
+        keywords = [
+            (row.get("Keywords") or row.get("keywords") or "").strip().lower()
+            for row in records
+        ]
+
+        keywords = [k for k in keywords if k]
+
+        print(f"✓ Loaded {len(keywords)} keywords from KEYWORDS sheet")
+        return keywords
+
+    except Exception as e:
+        print(f"⚠️ Could not load KEYWORDS sheet: {e}")
+        return []
+
+# ---------------- FILTER ---------------- #
+
+def filter_relevant_leads(leads, keywords):
+    if not leads:
+        return []
+
+    filtered = []
+
+    for lead in leads:
+        title = lead.get("Lead Title", "").lower()
+        matched_term = lead.get("Matched Term", "").lower()
+        text = f"{title} {matched_term}"
+
+        if lead.get("Lead Title") == "Not found":
+            filtered.append(lead)
+            continue
+
+        if any(kw in text for kw in keywords):
+            filtered.append(lead)
+            print(f"  ✓ Kept:    {lead['Lead Title'][:70]}")
+        else:
+            print(f"  ✗ Dropped: {lead['Lead Title'][:70]}")
+
+    print(f"✓ Keyword filter: {len(leads)} → {len(filtered)} relevant")
+    return filtered
+
+# ---------------- ARIBA ---------------- #
 
 def check_ariba_reachable():
     try:
@@ -140,8 +188,6 @@ def check_ariba_reachable():
         print(f"✗ Ariba not reachable: {e}")
         return False
 
-# ---------------- SELENIUM ---------------- #
-
 def build_driver(headless=True):
     options = Options()
     if headless:
@@ -149,255 +195,123 @@ def build_driver(headless=True):
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--remote-debugging-port=9222")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
 
-    os.environ["WDM_CACHE_PATH"] = "/tmp/wdm_cache"
     service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
-    driver.execute_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
-    return driver
-
-# ---------------- ARIBA LOGIN ---------------- #
+    return webdriver.Chrome(service=service, options=options)
 
 def ariba_login(driver, wait):
-    print("→ Opening Ariba login...")
-    driver.delete_all_cookies()
-    driver.get("about:blank")
-    time.sleep(1)
-
     driver.get("https://service.ariba.com/Authenticator.aw")
 
-    driver.save_screenshot("/tmp/ariba_login_page.png")
-    with open("/tmp/ariba_login_page.html", "w") as f:
-        f.write(driver.page_source)
-
-    username = wait.until(EC.presence_of_element_located(
-        (By.XPATH, "//input[@placeholder='Enter Username' or @name='UserName' or @id='UserName']")
-    ))
-    username.clear()
+    username = wait.until(EC.presence_of_element_located((By.NAME, "UserName")))
     username.send_keys(ARIBA_USERNAME)
-    print("✓ Username entered")
 
-    password = wait.until(EC.presence_of_element_located(
-        (By.XPATH, "//input[@placeholder='Enter Password' or @type='password']")
-    ))
-    password.clear()
+    password = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
     password.send_keys(ARIBA_PASSWORD)
-    print("✓ Password entered")
+    password.send_keys(Keys.RETURN)
 
-    clicked = False
-    buttons = driver.find_elements(By.XPATH, "//button | //input[@type='submit'] | //input[@type='button']")
-    for b in buttons:
-        if b.is_displayed():
-            try:
-                driver.execute_script("arguments[0].click();", b)
-                print(f"✓ Clicked login button: {b.tag_name} / {b.text!r}")
-                clicked = True
-                break
-            except:
-                continue
+    time.sleep(5)
 
-    if not clicked:
-        print("⚠️ No button clicked — sending ENTER")
-        password.send_keys(Keys.RETURN)
+def scroll_to_load_all(driver):
+    last_count = 0
+    stale_scrolls = 0
 
-    # Wait until page changes away from login
-    try:
-        WebDriverWait(driver, 20).until(
-            EC.any_of(
-                EC.url_changes("https://service.ariba.com/Authenticator.aw"),
-                EC.presence_of_element_located((By.XPATH, "//*[contains(@class,'dashboard') or contains(@class,'home')]"))
-            )
-        )
-    except:
-        print("⚠️ Login redirect timed out, continuing...")
+    while stale_scrolls < 4:
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
 
-    driver.save_screenshot("/tmp/ariba_post_login.png")
-    print("Post-login URL:", driver.current_url)
+        driver.execute_script("""
+            let containers = document.querySelectorAll('[class*="scroll"], [class*="list"], [class*="results"]');
+            containers.forEach(el => el.scrollTop = el.scrollHeight);
+        """)
+        time.sleep(1)
 
-    # Close Company Profile popup if present
-    try:
-        close_btn = WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable(
-                (By.XPATH, "//button[normalize-space(text())='Close'] | //button[@title='Close']")
-            )
-        )
-        driver.execute_script("arguments[0].click();", close_btn)
-        print("✓ Closed Company Profile popup")
-    except:
-        print("→ No popup, continuing...")
+        current_count = driver.execute_script("""
+            return document.querySelectorAll('[class*="card"], [class*="lead"], [class*="result"]').length
+        """)
 
-# ---------------- ARIBA SEARCH ---------------- #
+        if current_count == last_count:
+            stale_scrolls += 1
+        else:
+            stale_scrolls = 0
+            last_count = current_count
 
-def ariba_search_all_rfps(driver, wait, rfps):
-    all_results = []
-
-    # Force browser timezone to SGT so dates render correctly
-    driver.execute_cdp_cmd(
-        "Emulation.setTimezoneOverride",
-        {"timezoneId": "Asia/Singapore"}
-    )
-
-    # Build search URL with all RFP numbers joined by spaces
-    search_term = " ".join(rfps)
-    encoded_term = search_term.replace(" ", "%20")
-    search_url = (
-        f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/"
-        f"comsapsbncdiscoveryui#/leads/search?commodityName={encoded_term}&from=dashboard"
-    )
-
-    print(f"→ Searching all RFPs in one request...")
-    driver.get(search_url)
-
-    # Wait until results appear
-    try:
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.XPATH, "//*[contains(text(),'GPOR')]"))
-        )
-        print("✓ Results loaded")
-    except:
-        print("⚠️ Timed out waiting for results, continuing anyway...")
-
-    time.sleep(2)
-
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-
-    # Default all RFPs to "Not found"
-    results_map = {rfp: {
-        "RFI ID":     "",
-        "Lead Title": "Not found",
-        "Respond By": "",
-        "URL":        ""
-    } for rfp in rfps}
-
+def parse_cards(soup, search_terms):
+    results = []
     seen_rfi_ids = set()
 
     title_elements = soup.find_all(
-        lambda tag: tag.name in ["a", "h2", "h3", "span", "div"]
+        lambda tag: tag.name in ["a","h2","h3","span","div"]
         and re.search(r'GPOR\s*\d+', tag.get_text(strip=True), re.IGNORECASE)
         and len(tag.get_text(strip=True)) < 100
     )
 
     for title_el in title_elements:
-        # Walk up DOM to card container
         card = title_el
+
         for _ in range(6):
             parent = card.find_parent()
             if not parent:
                 break
-            parent_text = parent.get_text(separator=" ", strip=True)
+            parent_text = parent.get_text(" ", strip=True)
             if re.search(r'RF[A-Z]\s*[·•]', parent_text) and 'Respond By' in parent_text:
                 card = parent
                 break
             card = parent
 
-        card_text = re.sub(r'\s+', ' ', card.get_text(separator=" ", strip=True))
+        text = re.sub(r'\s+', ' ', card.get_text(" ", strip=True))
 
-        # Extract RFI ID
-        rfi_id_match = re.search(r'RF[A-Z]\s*[·•]\s*(\S+)', card_text)
-        rfi_id = rfi_id_match.group(1) if rfi_id_match else ""
+        rfi_match = re.search(r'RF[A-Z]\s*[·•]\s*(\S+)', text)
+        rfi_id = rfi_match.group(1) if rfi_match else ""
 
         if rfi_id in seen_rfi_ids:
             continue
         seen_rfi_ids.add(rfi_id)
 
-        # Extract Lead Title
-        title_match = re.match(r'^(.+?)\s+RF[A-Z]\s*[·•]', card_text)
-        lead_title = title_match.group(1).strip() if title_match else title_el.get_text(strip=True)
+        title_match = re.match(r'^(.+?)\s+RF[A-Z]', text)
+        title = title_match.group(1) if title_match else title_el.get_text(strip=True)
 
-        # Extract Respond By — sibling element first, then regex fallback
-        respond_by = ""
-        respond_label = card.find(
-            lambda tag: tag.get_text(strip=True) in ["Respond By:", "Respond By"]
-        )
-        if respond_label:
-            sibling = respond_label.find_next_sibling()
-            if sibling:
-                respond_by = sibling.get_text(strip=True)
-            if not respond_by and respond_label.parent:
-                next_parent = respond_label.parent.find_next_sibling()
-                if next_parent:
-                    respond_by = next_parent.get_text(strip=True)
+        deadline_match = re.search(r'Respond\s+By[:\s]*(.*)', text)
+        deadline = deadline_match.group(1) if deadline_match else ""
 
-        # Regex fallback — capture exactly as rendered on page, no reformatting
-        if not respond_by:
-            deadline_match = re.search(
-                r'Respond\s+By[:\s]*(\d{1,2}\s+[A-Za-z]{3}\s+\d{4},\s*\d{2}:\d{2}:\d{2})',
-                card_text
-            )
-            respond_by = deadline_match.group(1).strip() if deadline_match else ""
+        url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/RfxEvent/preview/{rfi_id}" if rfi_id else ""
 
-        url = (
-            f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/"
-            f"comsapsbncdiscoveryui#/RfxEvent/preview/{rfi_id}"
-            if rfi_id else ""
-        )
+        matched_term = next((t for t in search_terms if t.lower() in text.lower()), "")
 
-        # Match card to RFP
-        for rfp in rfps:
-            if rfp.upper() in card_text.upper():
-                results_map[rfp] = {
-                    "RFI ID":     rfi_id,
-                    "Lead Title": lead_title,
-                    "Respond By": respond_by,
-                    "URL":        url
-                }
-                print(f"  ✓ {rfp} → RFI ID: {rfi_id}, Respond By: {respond_by}")
-                break
+        results.append({
+            "RFI ID": rfi_id,
+            "Lead Title": title,
+            "Respond By": deadline,
+            "URL": url,
+            "Matched Term": matched_term
+        })
 
-    for rfp in rfps:
-        result = results_map[rfp]
-        if result["Lead Title"] == "Not found":
-            print(f"  ⚠️ {rfp} not found in results")
-        all_results.append(result)
+    return results
 
-    return all_results
+def ariba_search_all_rfps(driver, wait, search_terms):
+    encoded = "%20".join(search_terms)
+    url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/leads/search?commodityName={encoded}"
 
+    driver.get(url)
+    time.sleep(3)
 
-def clean_tender_data(results):
-    JUNK_PATTERNS = [
-        re.compile(r'^\d+\s+results\s+for', re.IGNORECASE),
-        re.compile(r'^filters\s+clear\s+all', re.IGNORECASE),
-        re.compile(r'^sort\s+by', re.IGNORECASE),
-    ]
+    scroll_to_load_all(driver)
 
-    def is_junk(title):
-        return any(p.match(title.strip()) for p in JUNK_PATTERNS)
-
-    cleaned = [r for r in results if not is_junk(r.get("Lead Title", ""))]
-
-    best = {}
-    for row in cleaned:
-        key = row["RFI ID"] or row["Lead Title"]
-        existing = best.get(key)
-        if existing is None:
-            best[key] = row
-        elif existing["Lead Title"] == "Not found" and row["Lead Title"] != "Not found":
-            best[key] = row
-
-    return list(best.values())
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    return parse_cards(soup, search_terms)
 
 # ---------------- MAIN ---------------- #
 
-def run_ariba_search(rfps):
+def run_ariba_search(search_terms):
     if not check_ariba_reachable():
-        print("⚠️ Skipping Ariba search — endpoint unreachable from this runner.")
         return []
 
-    driver = build_driver(headless=True)
+    driver = build_driver()
     wait = WebDriverWait(driver, 20)
-    results = []
 
     try:
         ariba_login(driver, wait)
-        results = ariba_search_all_rfps(driver, wait, rfps)
-    except Exception as e:
-        print(f"✗ Ariba session failed: {e}")
+        results = ariba_search_all_rfps(driver, wait, search_terms)
     finally:
         driver.quit()
 
@@ -416,19 +330,21 @@ def main():
             pharma_data = data
 
     rfps = extract_rfp_numbers(pharma_data)
-    print("RFPs found:", rfps)
+    keywords = get_keywords_from_sheet(sheet)
 
-    tender_data = run_ariba_search(rfps)
+    all_search_terms = list(dict.fromkeys(rfps + keywords))
+
+    tender_data = run_ariba_search(all_search_terms)
 
     if tender_data:
-        tender_data = clean_tender_data(tender_data)
+        tender_data = filter_relevant_leads(tender_data, keywords)
+
         write_to_sheet(
             get_or_create_worksheet(sheet, TENDER_ALERTS_SHEET),
             tender_data
         )
+
         print(f"✓ Written {len(tender_data)} rows to '{TENDER_ALERTS_SHEET}'")
-    else:
-        print("⚠️ No tender data written — Ariba search returned no results.")
 
 if __name__ == "__main__":
     main()
