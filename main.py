@@ -237,8 +237,13 @@ def ariba_login(driver, wait):
 def ariba_search_all_rfps(driver, wait, rfps):
     all_results = []
 
+    # Force browser timezone to SGT so dates render correctly
+    driver.execute_cdp_cmd(
+        "Emulation.setTimezoneOverride",
+        {"timezoneId": "Asia/Singapore"}
+    )
+
     # Build search URL with all RFP numbers joined by spaces
-    # Ariba accepts multiple terms in one search
     search_term = " ".join(rfps)
     encoded_term = search_term.replace(" ", "%20")
     search_url = (
@@ -246,7 +251,7 @@ def ariba_search_all_rfps(driver, wait, rfps):
         f"comsapsbncdiscoveryui#/leads/search?commodityName={encoded_term}&from=dashboard"
     )
 
-    print(f"→ Searching all RFPs in one request: {search_url}")
+    print(f"→ Searching all RFPs in one request...")
     driver.get(search_url)
 
     # Wait until results appear
@@ -305,7 +310,7 @@ def ariba_search_all_rfps(driver, wait, rfps):
         title_match = re.match(r'^(.+?)\s+RF[A-Z]\s*[·•]', card_text)
         lead_title = title_match.group(1).strip() if title_match else title_el.get_text(strip=True)
 
-        # Extract Respond By
+        # Extract Respond By — sibling element first, then regex fallback
         respond_by = ""
         respond_label = card.find(
             lambda tag: tag.get_text(strip=True) in ["Respond By:", "Respond By"]
@@ -319,9 +324,10 @@ def ariba_search_all_rfps(driver, wait, rfps):
                 if next_parent:
                     respond_by = next_parent.get_text(strip=True)
 
+        # Regex fallback — capture exactly as rendered on page, no reformatting
         if not respond_by:
             deadline_match = re.search(
-                r'Respond\s+By[:\s]+(\d{1,2}\s+[A-Za-z]{3}\s+\d{4}[\s,]*[\d:]*)',
+                r'Respond\s+By[:\s]*(\d{1,2}\s+[A-Za-z]{3}\s+\d{4},\s*\d{2}:\d{2}:\d{2})',
                 card_text
             )
             respond_by = deadline_match.group(1).strip() if deadline_match else ""
@@ -352,7 +358,6 @@ def ariba_search_all_rfps(driver, wait, rfps):
 
     return all_results
 
-# ---------------- CLEAN RESULTS ---------------- #
 
 def clean_tender_data(results):
     JUNK_PATTERNS = [
