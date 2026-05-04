@@ -34,8 +34,10 @@ def build_keyword_index(keywords):
     return {kw: embed(kw) for kw in keywords}
 
 def semantic_match(text, keyword_index):
-    text_vec = embed(text)
+    if not keyword_index:
+        return None, 0.0
 
+    text_vec = embed(text)
     best_kw = None
     best_score = 0
 
@@ -175,12 +177,15 @@ def write(ws, data):
 def get_keywords(ss):
     try:
         ws = ss.worksheet("KEYWORDS")
-        return [
+        kws = [
             (r.get("Keywords") or "").strip().lower()
             for r in ws.get_all_records()
             if r.get("Keywords")
         ]
-    except:
+        print(f"✅ Loaded {len(kws)} keywords: {kws[:5]}")
+        return kws
+    except Exception as e:
+        print(f"⚠️ Could not load KEYWORDS sheet: {e}")
         return []
 
 # ---------------- ARIBA ---------------- #
@@ -233,33 +238,40 @@ def parse_cards(html, terms):
     results = []
     seen = set()
 
-    pattern = re.compile(r'\b\d{10}\b')
+    # Match any ID-like token: uppercase letters/digits, 6+ chars
+    id_pattern = re.compile(r'\b[A-Z0-9]{6,}\b')
 
-    # FIX: use 'string' instead of deprecated 'text'
-    for el in soup.find_all(string=pattern):
-        rfi = pattern.search(el).group()
-        if rfi in seen:
+    for el in soup.find_all(["div", "li", "tr", "span", "td", "article", "section"]):
+        text = el.get_text(" ", strip=True)
+
+        # Skip elements that are too short or too long to be a lead card
+        if len(text) < 10 or len(text) > 2000:
             continue
-        seen.add(rfi)
 
-        # Walk up 4 levels to capture the full card context
-        parent = el.parent
-        for _ in range(4):
-            if parent.parent:
-                parent = parent.parent
+        # Deduplicate by first 100 chars of text
+        key = text[:100]
+        if key in seen:
+            continue
+        seen.add(key)
 
-        text = parent.get_text(" ", strip=True)
+        # Only keep elements that contain one of our search terms
         matched_term = next((t for t in terms if t.lower() in text.lower()), "")
+        if not matched_term:
+            continue
+
+        # Extract first ID-like token as the lead ID
+        ids = id_pattern.findall(text)
+        rfi_id = ids[0] if ids else "N/A"
 
         results.append({
-            "RFI ID": rfi,
+            "RFI ID": rfi_id,
             "Lead Title": text[:200],
             "Matched Term": matched_term
         })
 
-    print(f"Found {len(results)} cards with 10-digit IDs")
+    print(f"Found {len(results)} matching cards")
 
-    # Fallback debug: print sample page structure if nothing found
+    # Debug: print page structure sample if nothing matched
     if not results:
         print("=== PAGE STRUCTURE SAMPLE (first 20 non-trivial elements) ===")
         count = 0
@@ -280,7 +292,7 @@ def search_ariba(driver, terms):
 
     driver.get(url)
 
-    # Wait for JS-rendered cards to appear rather than a blind sleep
+    # Wait for JS-rendered cards rather than a blind sleep
     try:
         WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.CSS_SELECTOR,
@@ -297,7 +309,7 @@ def search_ariba(driver, terms):
     html = driver.page_source
     print("PAGE SIZE:", len(html))
 
-    # Save debug snapshot so you can inspect Ariba's actual HTML structure
+    # Save debug snapshot to inspect Ariba's actual HTML structure if needed
     try:
         with open("ariba_debug.html", "w", encoding="utf-8") as f:
             f.write(html)
@@ -310,13 +322,13 @@ def search_ariba(driver, terms):
 def run_ariba(terms):
     driver = build_driver()
     try:
-        # Sanity check: make sure driver is alive before doing anything
+        # Sanity check: make sure driver is alive
         driver.get("about:blank")
         print("✅ Driver OK, title:", driver.title)
 
         login(driver)
 
-        # Verify login actually succeeded
+        # Verify login succeeded
         current_url = driver.current_url
         page_title = driver.title
         print(f"Post-login URL: {current_url}")
@@ -344,9 +356,19 @@ def ai_filter(leads, index, threshold=0.55):
     out = []
 
     for l in leads:
-        l, score = enrich_lead_ai(l, index)
+        title = l.get("Lead Title", "")
 
-        print("SCORE:", score, l["Lead Title"][:60])
+        # If no keyword index available, keep all matched leads as-is
+        if not index:
+            l["AI_Matched_Keyword"] = "fallback"
+            l["AI_Match_Score"] = 1.0
+            l["AI_Category"] = "General"
+            out.append(l)
+            print(f"  ✅ No index — keeping: {title[:60]}")
+            continue
+
+        l, score = enrich_lead_ai(l, index)
+        print(f"  SCORE: {score} {title[:60]}")
 
         if score >= threshold:
             out.append(l)
@@ -384,6 +406,7 @@ def main():
         return
 
     index = build_keyword_index(keywords)
+    print(f"KEYWORD INDEX SIZE: {len(index)}")
 
     final = ai_filter(raw, index)
 
