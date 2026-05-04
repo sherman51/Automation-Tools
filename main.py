@@ -135,18 +135,6 @@ def extract_events(html, url):
 
     return results
 
-def extract_rfp_numbers(data):
-    pattern = re.compile(r'\b(?:RFP|GPOR)[-\s]?\w+\b', re.IGNORECASE)
-    out = set()
-
-    for row in data:
-        for v in row.values():
-            if isinstance(v, str):
-                for m in pattern.findall(v):
-                    out.add(m.strip())
-
-    return list(out)
-
 # ---------------- SHEETS ---------------- #
 
 def get_creds():
@@ -269,55 +257,72 @@ def parse_cards(html, terms):
             "Matched Term": matched_term
         })
 
-    print(f"Found {len(results)} matching cards")
+    print(f"  Found {len(results)} matching cards in this page")
 
     # Debug: print page structure sample if nothing matched
     if not results:
-        print("=== PAGE STRUCTURE SAMPLE (first 20 non-trivial elements) ===")
+        print("  === PAGE STRUCTURE SAMPLE (first 20 non-trivial elements) ===")
         count = 0
         for el in soup.find_all(["div", "li", "tr", "span"]):
             t = el.get_text(" ", strip=True)
             if len(t) > 80:
-                print(" |", t[:120])
+                print("  |", t[:120])
                 count += 1
                 if count >= 20:
                     break
 
     return results
 
-def search_ariba(driver, terms):
-    # Limit query length to avoid URL being too long
-    query = "%20".join(terms[:10])
-    url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/leads/search?commodityName={query}"
+def search_ariba(driver, terms, batch_size=5):
+    all_results = []
+    seen_titles = set()
+    total_batches = (len(terms) + batch_size - 1) // batch_size
 
-    driver.get(url)
+    for i in range(0, len(terms), batch_size):
+        batch = terms[i:i+batch_size]
+        batch_num = i // batch_size + 1
+        query = "%20".join(batch)
+        url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/leads/search?commodityName={query}"
 
-    # Wait for JS-rendered cards rather than a blind sleep
-    try:
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR,
-                "[class*='card'], [class*='lead'], [class*='result'], [class*='item']"
-            ))
-        )
-        print("✅ Content detected on page")
-    except Exception:
-        print("⚠️ Timed out waiting for card elements — proceeding anyway")
+        print(f"\n🔍 Batch {batch_num}/{total_batches}: {batch}")
+        driver.get(url)
 
-    scroll(driver)
-    time.sleep(3)  # small buffer after scrolling
+        # Wait for JS-rendered cards rather than a blind sleep
+        try:
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR,
+                    "[class*='card'], [class*='lead'], [class*='result'], [class*='item']"
+                ))
+            )
+            print("  ✅ Content detected on page")
+        except Exception:
+            print("  ⚠️ Timed out waiting for card elements — proceeding anyway")
 
-    html = driver.page_source
-    print("PAGE SIZE:", len(html))
+        scroll(driver)
+        time.sleep(3)
 
-    # Save debug snapshot to inspect Ariba's actual HTML structure if needed
+        html = driver.page_source
+        print(f"  PAGE SIZE: {len(html)}")
+
+        batch_results = parse_cards(html, terms)
+
+        # Deduplicate across batches by Lead Title
+        for r in batch_results:
+            key = r["Lead Title"][:100]
+            if key not in seen_titles:
+                seen_titles.add(key)
+                all_results.append(r)
+
+    # Save a single debug snapshot of the last page
     try:
         with open("ariba_debug.html", "w", encoding="utf-8") as f:
-            f.write(html)
-        print("📄 Debug snapshot saved to ariba_debug.html")
+            f.write(driver.page_source)
+        print("\n📄 Debug snapshot saved to ariba_debug.html")
     except Exception as e:
         print(f"Could not save debug snapshot: {e}")
 
-    return parse_cards(html, terms)
+    print(f"\n✅ Total unique results across all batches: {len(all_results)}")
+    return all_results
 
 def run_ariba(terms):
     driver = build_driver()
@@ -380,39 +385,40 @@ def ai_filter(leads, index, threshold=0.55):
 def main():
     ss = connect()
 
-    pharma = []
-
+    # Scrape ALPS pages and write to their sheets (for reference)
     for url, name in URL_SHEET_MAP.items():
         html = fetch(url)
         data = extract_events(html, url)
         write(get_ws(ss, name), data)
 
-        if "pharmaceutical" in name.lower():
-            pharma = data
-
-    rfps = extract_rfp_numbers(pharma)
+    # Use only keywords for Ariba search — no RFP number extraction
     keywords = get_keywords(ss)
 
-    terms = list(set(rfps + keywords))
+    if not keywords:
+        print("❌ No keywords found — check your KEYWORDS sheet has a 'Keywords' column with data")
+        return
 
-    print("TERMS:", len(terms))
+    terms = keywords
+    print(f"TERMS (keywords only): {len(terms)}")
 
     raw = run_ariba(terms)
 
-    print("RAW RESULTS:", len(raw))
+    print(f"\nRAW RESULTS: {len(raw)}")
 
     if not raw:
         print("❌ Ariba returned empty results")
         return
 
-    index = build_keyword_index(keywords)
+    # Build index from keywords for semantic scoring
+    index = build_keyword_index(terms)
     print(f"KEYWORD INDEX SIZE: {len(index)}")
 
     final = ai_filter(raw, index)
 
-    print("FINAL:", len(final))
+    print(f"FINAL: {len(final)}")
 
     write(get_ws(ss, TENDER_ALERTS_SHEET), final)
+    print(f"✅ Written to '{TENDER_ALERTS_SHEET}' sheet")
 
 if __name__ == "__main__":
     main()
