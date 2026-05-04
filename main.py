@@ -607,13 +607,62 @@ def parse_ariba_cards(driver):
 
 # ---------------- PAGINATION ---------------- #
 
-def click_next(driver):
+def dump_next_button_html(driver):
     """
-    Try all known Next-button selectors for Ariba's SAP UI5 interface.
-    Scrolls the button into view before clicking.
-    Returns True if a clickable Next button was found and clicked.
+    Print the full outer HTML of every candidate Next button so we can
+    see the exact element structure Ariba is rendering.
     """
     selectors = [
+        "button[aria-label*='Next Page']",
+        "button[aria-label*='Next']",
+        "[class*='sapMPaginatorNext']",
+        "[class*='nextPage']",
+    ]
+    print("  🔬 Next button HTML dump:")
+    for sel in selectors:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for i, el in enumerate(els[:3]):
+                html = el.get_attribute("outerHTML") or ""
+                print(f"    [{sel}][{i}]: {html[:300]}")
+        except Exception as e:
+            print(f"    [{sel}]: error — {e}")
+
+    # Also dump the pagination container if any
+    for pg_sel in ["[class*='sapMPaginator']", "[class*='pagination']", "[role='navigation']"]:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, pg_sel)
+            if els:
+                html = els[0].get_attribute("outerHTML") or ""
+                print(f"  🔬 Paginator [{pg_sel}]: {html[:500]}")
+                break
+        except Exception:
+            pass
+
+
+def click_next(driver):
+    """
+    Multi-strategy Next click for SAP UI5 / Ariba.
+
+    SAP UI5 buttons wrap inner <bdi> or <span> elements and sometimes
+    only respond to events dispatched on the inner child, not the outer
+    <button>. Headless Chrome also blocks synthetic JS clicks on some
+    UI5 controls — ActionChains (real mouse events) bypass this.
+
+    Strategy order:
+      1. ActionChains move-and-click on the button (real mouse event)
+      2. ActionChains click on inner <bdi>/<span> child
+      3. JS dispatchEvent MouseEvent on the button
+      4. JS dispatchEvent on inner child
+      5. JS .click() on button (original fallback)
+      6. Keyboard: focus button and press Enter/Space
+    """
+    from selenium.webdriver.common.action_chains import ActionChains
+
+    # Dump HTML on first call so we can see what we're dealing with
+    dump_next_button_html(driver)
+
+    primary_selectors = [
         "button[aria-label*='Next Page']",
         "button[aria-label*='Next']",
         "[class*='sapMPaginatorNext']",
@@ -622,18 +671,96 @@ def click_next(driver):
         "a[aria-label*='Next']",
         "[id*='nextPage']",
     ]
-    for sel in selectors:
+
+    btn = None
+    matched_sel = ""
+    for sel in primary_selectors:
         try:
-            btns = driver.find_elements(By.CSS_SELECTOR, sel)
-            for btn in btns:
-                if btn.is_displayed() and btn.is_enabled():
-                    driver.execute_script("arguments[0].scrollIntoView(true);", btn)
-                    time.sleep(0.3)
-                    driver.execute_script("arguments[0].click();", btn)
-                    print(f"  ➡️  Clicked Next via: {sel}")
-                    return True
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in els:
+                if el.is_displayed() and el.is_enabled():
+                    btn = el
+                    matched_sel = sel
+                    break
         except Exception:
             continue
+        if btn:
+            break
+
+    if not btn:
+        print("  ⏹  No visible+enabled Next button found")
+        return False
+
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+    time.sleep(0.5)
+
+    # Strategy 1: ActionChains real mouse click on button
+    try:
+        ActionChains(driver).move_to_element(btn).click().perform()
+        print(f"  ➡️  [S1] ActionChains click on button ({matched_sel})")
+        return True
+    except Exception as e:
+        print(f"  ⚠️  [S1] ActionChains failed: {e}")
+
+    # Strategy 2: ActionChains click on inner <bdi> or <span> child
+    try:
+        inner = btn.find_element(By.CSS_SELECTOR, "bdi, span")
+        ActionChains(driver).move_to_element(inner).click().perform()
+        print(f"  ➡️  [S2] ActionChains click on inner child")
+        return True
+    except Exception as e:
+        print(f"  ⚠️  [S2] Inner child ActionChains failed: {e}")
+
+    # Strategy 3: JS dispatchEvent MouseEvent on button
+    try:
+        driver.execute_script("""
+            var el = arguments[0];
+            ['mousedown','mouseup','click'].forEach(function(t){
+                el.dispatchEvent(new MouseEvent(t, {
+                    bubbles:true, cancelable:true, view:window
+                }));
+            });
+        """, btn)
+        print(f"  ➡️  [S3] JS dispatchEvent on button")
+        return True
+    except Exception as e:
+        print(f"  ⚠️  [S3] JS dispatchEvent failed: {e}")
+
+    # Strategy 4: JS dispatchEvent on inner child
+    try:
+        inner = btn.find_element(By.CSS_SELECTOR, "bdi, span")
+        driver.execute_script("""
+            var el = arguments[0];
+            ['mousedown','mouseup','click'].forEach(function(t){
+                el.dispatchEvent(new MouseEvent(t, {
+                    bubbles:true, cancelable:true, view:window
+                }));
+            });
+        """, inner)
+        print(f"  ➡️  [S4] JS dispatchEvent on inner child")
+        return True
+    except Exception as e:
+        print(f"  ⚠️  [S4] Inner dispatchEvent failed: {e}")
+
+    # Strategy 5: plain JS .click() (original approach, last resort)
+    try:
+        driver.execute_script("arguments[0].click();", btn)
+        print(f"  ➡️  [S5] JS .click() on button")
+        return True
+    except Exception as e:
+        print(f"  ⚠️  [S5] JS .click() failed: {e}")
+
+    # Strategy 6: keyboard — focus + Enter then Space
+    try:
+        driver.execute_script("arguments[0].focus();", btn)
+        time.sleep(0.2)
+        btn.send_keys(Keys.ENTER)
+        print(f"  ➡️  [S6] Keyboard Enter on button")
+        return True
+    except Exception as e:
+        print(f"  ⚠️  [S6] Keyboard Enter failed: {e}")
+
+    print("  ❌ All click strategies exhausted")
     return False
 
 # ---------------- ARIBA SEARCH ---------------- #
@@ -740,7 +867,11 @@ def search_ariba(driver, keyword_string):
         except Exception:
             pass
 
-        # Log Next button state immediately after click (key diagnostic)
+        # Log URL and Next button state immediately after click
+        try:
+            print(f"  🌐 Post-click URL: {driver.execute_script('return window.location.href;')}")
+        except Exception:
+            pass
         btn_state = get_next_button_state(driver)
         print(f"  🔍 Post-click Next btn: enabled={btn_state['enabled']} "
               f"aria_disabled={btn_state['aria_disabled']} "
