@@ -188,22 +188,31 @@ def get_keywords(ss):
 def build_driver():
     options = Options()
 
-    # REQUIRED for GitHub Actions stability
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--disable-software-rasterizer")
-    options.add_argument("--remote-debugging-port=9222")
     options.add_argument("--window-size=1920,1080")
 
-    # prevents random crashes in CI
-    options.add_argument("--single-process")
-    options.add_argument("--no-zygote")
+    # Remove --single-process (crashes Chrome 114+)
+    # Remove --no-zygote (conflicts with newer Chrome)
+    # Remove --disable-software-rasterizer (unnecessary, causes issues)
+    # Remove --remote-debugging-port (conflicts with WebDriver)
+
+    # Add these for Chrome 147+ stability
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-infobars")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    # Use specific binary if available in CI
+    # options.binary_location = "/usr/bin/google-chrome-stable"
 
     service = Service(ChromeDriverManager().install())
-
-    return webdriver.Chrome(service=service, options=options)
+    driver = webdriver.Chrome(service=service, options=options)
+    driver.set_page_load_timeout(60)
+    return driver
 
 def login(driver):
     driver.get("https://service.ariba.com/Authenticator.aw")
