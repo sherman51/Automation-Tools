@@ -183,7 +183,7 @@ def get_keywords(ss):
     except:
         return []
 
-# ---------------- ARIBA FIXED ---------------- #
+# ---------------- ARIBA ---------------- #
 
 def build_driver():
     options = Options()
@@ -194,20 +194,16 @@ def build_driver():
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
 
-    # Remove --single-process (crashes Chrome 114+)
-    # Remove --no-zygote (conflicts with newer Chrome)
-    # Remove --disable-software-rasterizer (unnecessary, causes issues)
-    # Remove --remote-debugging-port (conflicts with WebDriver)
-
-    # Add these for Chrome 147+ stability
+    # Stability fixes for Chrome 147+ in CI
+    # Removed: --single-process (crashes Chrome 114+)
+    # Removed: --no-zygote (conflicts with newer Chrome)
+    # Removed: --disable-software-rasterizer (causes issues)
+    # Removed: --remote-debugging-port (conflicts with WebDriver protocol)
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-infobars")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-
-    # Use specific binary if available in CI
-    # options.binary_location = "/usr/bin/google-chrome-stable"
 
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
@@ -234,47 +230,113 @@ def scroll(driver):
 
 def parse_cards(html, terms):
     soup = BeautifulSoup(html, "html.parser")
-
-    cards = soup.find_all(text=re.compile(r"\d{10}"))
-
     results = []
-    for c in cards:
-        parent = c.parent
-        text = parent.get_text(" ", strip=True)
+    seen = set()
 
-        rfi = c.strip()
+    pattern = re.compile(r'\b\d{10}\b')
+
+    # FIX: use 'string' instead of deprecated 'text'
+    for el in soup.find_all(string=pattern):
+        rfi = pattern.search(el).group()
+        if rfi in seen:
+            continue
+        seen.add(rfi)
+
+        # Walk up 4 levels to capture the full card context
+        parent = el.parent
+        for _ in range(4):
+            if parent.parent:
+                parent = parent.parent
+
+        text = parent.get_text(" ", strip=True)
+        matched_term = next((t for t in terms if t.lower() in text.lower()), "")
 
         results.append({
             "RFI ID": rfi,
-            "Lead Title": text[:120],
-            "Matched Term": next((t for t in terms if t in text.lower()), "")
+            "Lead Title": text[:200],
+            "Matched Term": matched_term
         })
+
+    print(f"Found {len(results)} cards with 10-digit IDs")
+
+    # Fallback debug: print sample page structure if nothing found
+    if not results:
+        print("=== PAGE STRUCTURE SAMPLE (first 20 non-trivial elements) ===")
+        count = 0
+        for el in soup.find_all(["div", "li", "tr", "span"]):
+            t = el.get_text(" ", strip=True)
+            if len(t) > 80:
+                print(" |", t[:120])
+                count += 1
+                if count >= 20:
+                    break
 
     return results
 
 def search_ariba(driver, terms):
-    query = "%20".join(terms)
+    # Limit query length to avoid URL being too long
+    query = "%20".join(terms[:10])
     url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/leads/search?commodityName={query}"
 
     driver.get(url)
 
-    time.sleep(8)  # important wait
+    # Wait for JS-rendered cards to appear rather than a blind sleep
+    try:
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR,
+                "[class*='card'], [class*='lead'], [class*='result'], [class*='item']"
+            ))
+        )
+        print("✅ Content detected on page")
+    except Exception:
+        print("⚠️ Timed out waiting for card elements — proceeding anyway")
 
     scroll(driver)
+    time.sleep(3)  # small buffer after scrolling
 
     html = driver.page_source
+    print("PAGE SIZE:", len(html))
 
-    print("PAGE SIZE:", len(html))  # DEBUG
+    # Save debug snapshot so you can inspect Ariba's actual HTML structure
+    try:
+        with open("ariba_debug.html", "w", encoding="utf-8") as f:
+            f.write(html)
+        print("📄 Debug snapshot saved to ariba_debug.html")
+    except Exception as e:
+        print(f"Could not save debug snapshot: {e}")
 
     return parse_cards(html, terms)
 
 def run_ariba(terms):
     driver = build_driver()
     try:
+        # Sanity check: make sure driver is alive before doing anything
+        driver.get("about:blank")
+        print("✅ Driver OK, title:", driver.title)
+
         login(driver)
+
+        # Verify login actually succeeded
+        current_url = driver.current_url
+        page_title = driver.title
+        print(f"Post-login URL: {current_url}")
+        print(f"Post-login title: {page_title}")
+
+        if "login" in current_url.lower() or "authenticat" in current_url.lower():
+            print("❌ Login may have failed — still on auth page")
+            return []
+
         return search_ariba(driver, terms)
+
+    except Exception as e:
+        print(f"❌ Ariba error: {e}")
+        return []
+
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 # ---------------- AI FILTER ---------------- #
 
