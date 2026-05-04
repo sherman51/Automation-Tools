@@ -2,18 +2,21 @@ name: ALPS Sourcing Events Scraper
 
 on:
   schedule:
-    - cron: "0 1 * * *"   # Runs daily at 1:00 AM UTC (9:00 AM Singapore time)
-  workflow_dispatch:        # Also allows manual trigger from GitHub Actions tab
+    - cron: "0 1 * * *"  # Daily at 1:00 AM UTC (9:00 AM Singapore time)
+  workflow_dispatch:      # Manual trigger from GitHub Actions tab
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # Opt into Node 24, fixes deprecation warnings
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
     env:
       GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
       ARIBA_USERNAME: ${{ secrets.ARIBA_USERNAME }}
       ARIBA_PASSWORD: ${{ secrets.ARIBA_PASSWORD }}
       ARIBA_COOKIES_JSON: ${{ secrets.ARIBA_COOKIES_JSON }}
+      DEBUG_DIR: /tmp  # All debug screenshots/HTML dumps save here
 
     steps:
       - name: Checkout repository
@@ -50,29 +53,8 @@ jobs:
         with:
           name: ariba-debug-screenshots
           path: |
-            /tmp/ariba_login_page.png
-            /tmp/ariba_login_page.html
-            /tmp/ariba_post_login.png
-            /tmp/ariba_post_login.html
-            /tmp/ariba_after_close_popup.png
-            /tmp/ariba_discovery.png
-            /tmp/ariba_discovery.html
-            /tmp/ariba_results_all.png
-            /tmp/ariba_results_all.html
-            /tmp/ariba_before_login_click.png
-            /tmp/ariba_no_password.png
-            /tmp/ariba_after_click.html
-            /tmp/ariba_step1_login_page.png
-            /tmp/ariba_step2_after_username.png
-            /tmp/ariba_step2_after_username.html
-            /tmp/ariba_step3_post_login.png
-            /tmp/ss_01_dashboard.png
-            /tmp/ss_02_typed_*.png
-            /tmp/ss_03_results_*.png
-            /tmp/ss_04_singapore_typed_*.png
-            /tmp/ss_04_singapore_error_*.png
-            /tmp/ss_05_singapore_filtered_*.png
-            /tmp/ss_06_done_*.png
+            /tmp/ariba_*.png
             /tmp/ariba_*.html
+            /tmp/ss_*.png
           retention-days: 3
           if-no-files-found: ignore
