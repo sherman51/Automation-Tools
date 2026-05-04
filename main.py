@@ -22,7 +22,6 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 from sentence_transformers import SentenceTransformer
 
-# lightweight model (fast + good enough for procurement matching)
 MODEL = SentenceTransformer("all-MiniLM-L6-v2")
 
 def embed(text):
@@ -32,11 +31,9 @@ def cosine_similarity(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 def build_keyword_index(keywords):
-    """Precompute keyword embeddings once"""
     return {kw: embed(kw) for kw in keywords}
 
 def semantic_match(text, keyword_index):
-    """Find best matching keyword using cosine similarity"""
     text_vec = embed(text)
 
     best_kw = None
@@ -44,7 +41,6 @@ def semantic_match(text, keyword_index):
 
     for kw, vec in keyword_index.items():
         score = cosine_similarity(text_vec, vec)
-
         if score > best_score:
             best_score = score
             best_kw = kw
@@ -52,9 +48,9 @@ def semantic_match(text, keyword_index):
     return best_kw, round(best_score, 3)
 
 def enrich_lead_ai(lead, keyword_index):
-    text = f"{lead.get('Lead Title','')} {lead.get('Matched Term','')}"
+    text = f"{lead.get('Lead Title','')} {lead.get('Matched Term','')}".strip()
 
-    if not text.strip():
+    if not text:
         text = "unknown"
 
     kw, score = semantic_match(text, keyword_index)
@@ -62,7 +58,6 @@ def enrich_lead_ai(lead, keyword_index):
     lead["AI_Matched_Keyword"] = kw
     lead["AI_Match_Score"] = score
 
-    # simple classification layer
     t = text.lower()
     if any(x in t for x in ["drug", "pharma", "medicine", "vaccine", "clinical"]):
         lead["AI_Category"] = "Pharma"
@@ -207,29 +202,28 @@ def get_keywords_from_sheet(spreadsheet):
         print(f"⚠️ Could not load KEYWORDS sheet: {e}")
         return []
 
-# ---------------- LEGACY FILTER (kept unchanged) ---------------- #
+# ---------------- LEGACY FILTER (kept) ---------------- #
 
 def filter_relevant_leads(leads, keywords):
     return leads
 
-# ---------------- AI FILTER (CORE ENGINE) ---------------- #
+# ---------------- AI FILTER ---------------- #
 
-def ai_filter_leads(leads, keyword_index, threshold=0.75):
+def ai_filter_leads(leads, keyword_index, threshold=0.55):
     filtered = []
 
     for lead in leads:
         lead, score = enrich_lead_ai(lead, keyword_index)
 
+        print(f"DEBUG SCORE {score} | {lead['Lead Title'][:60]}")
+
         if score >= threshold or lead.get("Lead Title") == "Not found":
             filtered.append(lead)
-            print(f"✓ KEEP ({score}): {lead['Lead Title'][:70]}")
-        else:
-            print(f"✗ DROP ({score}): {lead['Lead Title'][:70]}")
 
     print(f"AI Filtered: {len(filtered)}/{len(leads)} kept")
     return filtered
 
-# ---------------- ARIBA (UNCHANGED) ---------------- #
+# ---------------- ARIBA ---------------- #
 
 def check_ariba_reachable():
     try:
@@ -312,8 +306,7 @@ def parse_cards(soup, search_terms):
         title_match = re.match(r'^(.+?)\s+(?:RFI|RF[A-Z])\b', text)
         title = title_match.group(1).strip() if title_match else text[:80]
 
-        deadline_match = re.search(r'Respond\s+By[:\s]*([\w,: ]+(?:AM|PM))', text)
-        deadline = deadline_match.group(1).strip() if deadline_match else ""
+        deadline = ""
 
         url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/RfxEvent/preview/{rfi_id}"
 
@@ -377,17 +370,21 @@ def main():
 
     search_terms = list(dict.fromkeys(rfps + keywords))
 
+    print("SEARCH TERMS:", len(search_terms))
+
     tender_data = run_ariba_search(search_terms)
 
+    print("RAW ARIBA RESULTS:", len(tender_data))
+
     if tender_data:
-        tender_data = ai_filter_leads(tender_data, keyword_index, threshold=0.75)
+        tender_data = ai_filter_leads(tender_data, keyword_index, threshold=0.55)
+
+        print("FINAL RESULTS:", len(tender_data))
 
         write_to_sheet(
             get_or_create_worksheet(sheet, TENDER_ALERTS_SHEET),
             tender_data
         )
-
-        print(f"✓ Written {len(tender_data)} rows")
 
 if __name__ == "__main__":
     main()
