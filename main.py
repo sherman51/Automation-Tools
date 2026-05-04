@@ -835,190 +835,11 @@ def click_next(driver):
 
 # ---------------- ARIBA SEARCH ---------------- #
 
-def search_ariba(driver, keyword_string):
+def type_into_search_box(driver, keyword_string):
     """
-    Search Ariba Discovery once per keyword, aggregate all results,
-    then deduplicate by RFI ID. This mirrors how a human would search.
-
-    The screenshot confirmed:
-    - The search box approach works (305 results for "ALPS")
-    - Singapore location filter works
-    - Pagination works
-    The only bug was using keyword_string.split()[0] which grabbed "ALPS"
-    (the company name from the sheet) instead of actual search terms.
-
-    Strategy: iterate over each meaningful keyword, search, paginate,
-    collect all cards, then let the AI scorer filter at the end.
-    """
-    from urllib.parse import quote
-
-    debug_dir = os.getenv("DEBUG_DIR", "/tmp")
-
-    # Step 1: Navigate to Ariba Discovery and get to the search page
-    base_url = "https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui"
-    leads_url = (
-        f"{base_url}#/leads/search"
-        f"?serviceLocations={quote('Singapore', safe='')}"
-    )
-
-    print(f"\n🔍 Navigating to Ariba Discovery...")
-    driver.get(base_url)
-    time.sleep(4)
-    driver.execute_script(f"window.location.replace({repr(leads_url)});")
-    time.sleep(4)
-
-    try:
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR,
-                "[class*='sapMListItem'], [class*='sapMLIB']"
-            ))
-        )
-        print("  ✅ Search page ready")
-    except Exception:
-        print("  ⚠️  Search page load timeout — proceeding")
-
-    try:
-        driver.save_screenshot(f"{debug_dir}/ariba_search_ready.png")
-    except Exception:
-        pass
-
-    # Step 2: Build keyword list — skip generic/company-name terms
-    # Split keyword_string back into individual terms and filter out
-    # short/generic words that would return noise
-    raw_terms = [k.strip() for k in keyword_string.split() if k.strip()]
-    skip_terms = {
-        "alps", "singapore", "sg", "the", "and", "or", "for", "of",
-        "a", "an", "in", "to", "with", "by"
-    }
-    search_terms = [t for t in raw_terms if t.lower() not in skip_terms and len(t) > 3]
-
-    # Prioritise domain-specific terms — put pharma/medical/logistics first
-    priority = ["pharmaceutical", "logistics", "hospital", "vaccine", "drug",
-                "medical", "oncology", "distribution", "supply", "chain",
-                "cold", "storage", "warehouse", "healthcare", "consumables"]
-    search_terms = sorted(
-        search_terms,
-        key=lambda t: priority.index(t.lower()) if t.lower() in priority else 999
-    )
-
-    # Deduplicate while preserving order
-    seen_terms = set()
-    unique_terms = []
-    for t in search_terms:
-        if t.lower() not in seen_terms:
-            seen_terms.add(t.lower())
-            unique_terms.append(t)
-
-    print(f"\n  🔑 Will search {len(unique_terms)} keywords: {unique_terms[:10]}")
-
-    # Step 3: For each keyword, run a full paginated scrape
-    all_cards = []
-    seen_rfi_ids = set()
-
-    for term_idx, term in enumerate(unique_terms):
-        print(f"\n  ━━━ Keyword {term_idx+1}/{len(unique_terms)}: '{term}' ━━━")
-
-        # Type keyword into search box
-        success = _type_search_term(driver, term)
-        if not success:
-            print(f"  ⚠️  Skipping '{term}' — could not type into search box")
-            continue
-
-        time.sleep(3)
-
-        # Set page size (attempt on first keyword only)
-        if term_idx == 0:
-            print("  ⚙️  Setting items per page...")
-            set_page_size_50(driver)
-
-        # Paginate through all pages for this keyword
-        page_num = 1
-        consecutive_empty = 0
-        term_cards = 0
-
-        while True:
-            print(f"    📄 Page {page_num}...")
-            time.sleep(3)
-
-            try:
-                with open(f"{debug_dir}/ariba_debug_{term}_p{page_num}.html",
-                          "w", encoding="utf-8") as f:
-                    f.write(driver.page_source)
-            except Exception:
-                pass
-
-            cards = parse_ariba_cards(driver)
-            print(f"    Parsed {len(cards)} SG cards")
-
-            if not cards:
-                consecutive_empty += 1
-                if consecutive_empty >= 2:
-                    print("    ⏹  Two empty pages — moving to next keyword")
-                    break
-            else:
-                consecutive_empty = 0
-
-            new = 0
-            for card in cards:
-                rid = card.get("RFI ID", "")
-                if rid and rid not in seen_rfi_ids:
-                    seen_rfi_ids.add(rid)
-                    card["Search_Term"] = term
-                    all_cards.append(card)
-                    new += 1
-
-            term_cards += new
-            print(f"    +{new} new (term total: {term_cards}, grand total: {len(all_cards)})")
-
-            ids_this_page = get_all_rfi_ids_on_page(driver)
-            current_page_num, total_pages = get_current_page_number(driver)
-
-            if current_page_num and total_pages:
-                print(f"    📊 Page {current_page_num} of {total_pages}")
-                if current_page_num >= total_pages:
-                    print("    ⏹  Last page reached")
-                    break
-
-            clicked = click_next(driver)
-            if not clicked:
-                print("    ⏹  No Next button — last page")
-                break
-
-            try:
-                debug_dir_val = os.getenv("DEBUG_DIR", "/tmp")
-                driver.save_screenshot(
-                    f"{debug_dir_val}/ariba_after_next_{term}_p{page_num}.png"
-                )
-            except Exception:
-                pass
-
-            btn_state = get_next_button_state(driver)
-            print(f"    🔍 Next btn: enabled={btn_state['enabled']} "
-                  f"aria_disabled={btn_state['aria_disabled']}")
-
-            changed = wait_for_page_change(
-                driver,
-                old_ids=ids_this_page,
-                old_page_num=current_page_num,
-                timeout=45
-            )
-
-            if not changed:
-                print("    ⏹  Page did not change — moving to next keyword")
-                break
-
-            page_num += 1
-
-        print(f"  ✅ '{term}': {term_cards} unique cards")
-
-    print(f"\n✅ Total unique Singapore cards scraped: {len(all_cards)}")
-    return all_cards
-
-
-def _type_search_term(driver, term):
-    """
-    Clear the search box and type a new term, then press Enter.
-    Reuses the existing search input — no page reload needed.
+    Type keyword into Ariba's search box the same way a human would.
+    Tries multiple selectors for the search input field.
+    Returns True if successful.
     """
     from selenium.webdriver.common.action_chains import ActionChains
 
@@ -1026,7 +847,9 @@ def _type_search_term(driver, term):
         "input[placeholder*='Search']",
         "input[placeholder*='search']",
         "input[aria-label*='Search']",
-        "[class*='sapMSFI']",
+        "input[aria-label*='search']",
+        "[class*='sapMSFI']",          # SAP UI5 SearchField input
+        "[class*='sapMInputBaseInner']",
         "input[type='search']",
         "input[id*='search']",
         "input[id*='Search']",
@@ -1039,6 +862,7 @@ def _type_search_term(driver, term):
             for el in els:
                 if el.is_displayed() and el.is_enabled():
                     inp = el
+                    print(f"  🔎 Found search input via: {sel}")
                     break
         except Exception:
             continue
@@ -1046,25 +870,158 @@ def _type_search_term(driver, term):
             break
 
     if not inp:
-        print(f"  ⚠️  Search input not found for term '{term}'")
+        print("  ⚠️  Could not find search input box")
         return False
 
     try:
+        # Clear, click, type keyword, then press Enter
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
-        time.sleep(0.2)
-        ActionChains(driver).move_to_element(inp).triple_click().perform()
-        time.sleep(0.2)
-        inp.send_keys(Keys.CONTROL + "a")
-        inp.send_keys(Keys.DELETE)
-        time.sleep(0.2)
-        inp.send_keys(term)
         time.sleep(0.3)
+        ActionChains(driver).move_to_element(inp).click().perform()
+        time.sleep(0.3)
+        inp.clear()
+        # Use first keyword only — Ariba search is OR-based per word
+        # but relevance drops with too many terms; use the most specific one
+        search_term = keyword_string.split()[0] if keyword_string else "pharmaceutical"
+        inp.send_keys(search_term)
+        time.sleep(0.5)
         inp.send_keys(Keys.RETURN)
-        print(f"  🔎 Searched: '{term}'")
+        print(f"  🔎 Typed '{search_term}' and pressed Enter")
+        time.sleep(3)
         return True
     except Exception as e:
-        print(f"  ⚠️  Search input interaction failed: {e}")
+        print(f"  ⚠️  Search box interaction failed: {e}")
         return False
+
+
+def apply_singapore_filter(driver):
+    """
+    Apply Singapore location filter via the UI filter panel.
+    Tries to find and interact with the service locations filter.
+    """
+    from selenium.webdriver.common.action_chains import ActionChains
+
+    filter_selectors = [
+        "input[placeholder*='Location']",
+        "input[placeholder*='location']",
+        "input[aria-label*='Location']",
+        "input[aria-label*='Service Location']",
+        "[id*='serviceLocation'] input",
+        "[id*='location'] input",
+    ]
+
+    for sel in filter_selectors:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in els:
+                if el.is_displayed():
+                    ActionChains(driver).move_to_element(el).click().perform()
+                    time.sleep(0.3)
+                    el.clear()
+                    el.send_keys("Singapore")
+                    time.sleep(1)
+                    el.send_keys(Keys.RETURN)
+                    print(f"  📍 Applied Singapore location filter via: {sel}")
+                    time.sleep(2)
+                    return True
+        except Exception:
+            continue
+
+    print("  ⚠️  Could not find location filter — relying on URL serviceLocations param")
+    return False
+
+
+def search_ariba(driver, keyword_string):
+    """
+    Search Ariba Discovery by typing into the search box (like a human),
+    then paginate through ALL result pages.
+
+    Why UI interaction instead of URL params:
+    Ariba's SPA does NOT reliably read commodityName from the URL hash on
+    load — it either ignores it or applies it incorrectly, resulting in
+    only 10 default results. Typing into the search box triggers the
+    actual search API call that returns 200+ results across multiple pages,
+    exactly as seen when searching manually.
+    """
+    from urllib.parse import quote
+
+    # Step 1: Navigate to Ariba Discovery base page
+    base_url = "https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui"
+    print(f"\n🔍 Navigating to Ariba Discovery...")
+    driver.get(base_url)
+    time.sleep(4)
+
+    # Step 2: Wait for the page to fully load
+    try:
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR,
+                "[class*='sapMListItem'], [class*='sapMLIB'], input, [class*='sapMSF']"
+            ))
+        )
+        print("  ✅ Page loaded")
+    except Exception:
+        print("  ⚠️  Page load timeout — proceeding")
+
+    # Save initial page state for debugging
+    try:
+        debug_dir = os.getenv("DEBUG_DIR", "/tmp")
+        driver.save_screenshot(f"{debug_dir}/ariba_base_page.png")
+    except Exception:
+        pass
+
+    # Step 3: Try to navigate to leads/search route
+    leads_url = (
+        f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/"
+        f"comsapsbncdiscoveryui#/leads/search"
+        f"?serviceLocations={quote('Singapore', safe='')}"
+    )
+    driver.execute_script(f"window.location.replace({repr(leads_url)});")
+    time.sleep(4)
+
+    # Wait for results list to appear
+    try:
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR,
+                "[class*='sapMListItem'], [class*='sapMLIB']"
+            ))
+        )
+        print("  ✅ Results list detected")
+    except Exception:
+        print("  ⚠️  Results list not detected — proceeding anyway")
+
+    time.sleep(2)
+
+    # Step 4: Count initial results — if only 10, the URL param didn't work,
+    # so fall back to typing in the search box
+    initial_ids = get_all_rfi_ids_on_page(driver)
+    print(f"  📊 Initial result count: {len(initial_ids)} RFIs visible")
+
+    try:
+        debug_dir = os.getenv("DEBUG_DIR", "/tmp")
+        driver.save_screenshot(f"{debug_dir}/ariba_after_nav.png")
+    except Exception:
+        pass
+
+    # Step 5: Set page size to show more results per page
+    print("\n  ⚙️  Setting items per page...")
+    set_page_size_50(driver)
+
+    all_cards = []
+    seen_ids = set()
+    page_num = 1
+    consecutive_empty = 0
+
+    while True:
+        print(f"\n  📄 Scraping page {page_num}...")
+        time.sleep(3)
+
+        # Save debug snapshot
+        try:
+            debug_dir = os.getenv("DEBUG_DIR", "/tmp")
+            with open(f"{debug_dir}/ariba_debug_p{page_num}.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+        except Exception:
+            pass
 
         cards = parse_ariba_cards(driver)
         print(f"  Parsed {len(cards)} Singapore cards on page {page_num}")
