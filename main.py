@@ -18,7 +18,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
-# ---------------- FREE AI ENGINE (LOCAL EMBEDDINGS) ---------------- #
+# ---------------- AI ENGINE ---------------- #
 
 from sentence_transformers import SentenceTransformer
 
@@ -49,7 +49,6 @@ def semantic_match(text, keyword_index):
 
 def enrich_lead_ai(lead, keyword_index):
     text = f"{lead.get('Lead Title','')} {lead.get('Matched Term','')}".strip()
-
     if not text:
         text = "unknown"
 
@@ -59,9 +58,9 @@ def enrich_lead_ai(lead, keyword_index):
     lead["AI_Match_Score"] = score
 
     t = text.lower()
-    if any(x in t for x in ["drug", "pharma", "medicine", "vaccine", "clinical"]):
+    if any(x in t for x in ["drug", "pharma", "vaccine", "clinical"]):
         lead["AI_Category"] = "Pharma"
-    elif any(x in t for x in ["it", "software", "system", "cloud", "digital"]):
+    elif any(x in t for x in ["it", "software", "cloud", "system"]):
         lead["AI_Category"] = "IT"
     else:
         lead["AI_Category"] = "General"
@@ -80,34 +79,20 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9"
 }
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
-
 SPREADSHEET_ID = "1ZGf468X845aw8pJ4hmdyYHsV7JrrHhZsCxq4mXLrRdg"
-ARIBA_USERNAME = os.getenv("ARIBA_USERNAME", "")
-ARIBA_PASSWORD = os.getenv("ARIBA_PASSWORD", "")
 TENDER_ALERTS_SHEET = "Tender Alerts"
 
-# ---------------- GOOGLE AUTH ---------------- #
-
-def get_google_creds():
-    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    if not creds_json:
-        raise Exception("Missing GOOGLE_CREDENTIALS_JSON")
-    creds_dict = json.loads(creds_json)
-    return Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+ARIBA_USERNAME = os.getenv("ARIBA_USERNAME", "")
+ARIBA_PASSWORD = os.getenv("ARIBA_PASSWORD", "")
 
 # ---------------- SCRAPER ---------------- #
 
 def fetch(url):
     try:
-        res = requests.get(url, headers=HEADERS, timeout=30)
-        res.raise_for_status()
-        return res.text
-    except Exception as e:
-        print(f"Error fetching {url}: {e}")
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        return r.text
+    except:
         return ""
 
 def extract_events(html, url):
@@ -149,242 +134,186 @@ def extract_events(html, url):
     return results
 
 def extract_rfp_numbers(data):
-    rfp_set = set()
     pattern = re.compile(r'\b(?:RFP|GPOR)[-\s]?\w+\b', re.IGNORECASE)
+    out = set()
 
     for row in data:
-        for val in row.values():
-            if isinstance(val, str):
-                matches = pattern.findall(val)
-                for m in matches:
-                    rfp_set.add(m.strip())
+        for v in row.values():
+            if isinstance(v, str):
+                for m in pattern.findall(v):
+                    out.add(m.strip())
 
-    return list(rfp_set)
+    return list(out)
 
-# ---------------- GOOGLE SHEETS ---------------- #
+# ---------------- SHEETS ---------------- #
 
-def connect_spreadsheet():
-    client = gspread.authorize(get_google_creds())
-    return client.open_by_key(SPREADSHEET_ID)
+def get_creds():
+    return Credentials.from_service_account_info(
+        json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON")),
+        scopes=["https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"]
+    )
 
-def get_or_create_worksheet(spreadsheet, name):
+def connect():
+    return gspread.authorize(get_creds()).open_by_key(SPREADSHEET_ID)
+
+def get_ws(ss, name):
     try:
-        return spreadsheet.worksheet(name)
+        return ss.worksheet(name)
     except:
-        return spreadsheet.add_worksheet(title=name, rows="1000", cols="20")
+        return ss.add_worksheet(title=name, rows="1000", cols="20")
 
-def write_to_sheet(sheet, data):
-    sheet.clear()
+def write(ws, data):
+    ws.clear()
     if not data:
         return
     headers = list(data[0].keys())
-    rows = [headers] + [[row.get(h, "") for h in headers] for row in data]
-    sheet.update(rows)
+    ws.update([headers] + [[r.get(h, "") for h in headers] for r in data])
 
 # ---------------- KEYWORDS ---------------- #
 
-def get_keywords_from_sheet(spreadsheet):
+def get_keywords(ss):
     try:
-        ws = spreadsheet.worksheet("KEYWORDS")
-        records = ws.get_all_records()
-
-        keywords = [
-            (row.get("Keywords") or row.get("keywords") or "").strip().lower()
-            for row in records
+        ws = ss.worksheet("KEYWORDS")
+        return [
+            (r.get("Keywords") or "").strip().lower()
+            for r in ws.get_all_records()
+            if r.get("Keywords")
         ]
-
-        keywords = [k for k in keywords if k]
-
-        print(f"✓ Loaded {len(keywords)} keywords")
-        return keywords
-
-    except Exception as e:
-        print(f"⚠️ Could not load KEYWORDS sheet: {e}")
+    except:
         return []
 
-# ---------------- LEGACY FILTER (kept) ---------------- #
+# ---------------- ARIBA FIXED ---------------- #
 
-def filter_relevant_leads(leads, keywords):
-    return leads
-
-# ---------------- AI FILTER ---------------- #
-
-def ai_filter_leads(leads, keyword_index, threshold=0.55):
-    filtered = []
-
-    for lead in leads:
-        lead, score = enrich_lead_ai(lead, keyword_index)
-
-        print(f"DEBUG SCORE {score} | {lead['Lead Title'][:60]}")
-
-        if score >= threshold or lead.get("Lead Title") == "Not found":
-            filtered.append(lead)
-
-    print(f"AI Filtered: {len(filtered)}/{len(leads)} kept")
-    return filtered
-
-# ---------------- ARIBA ---------------- #
-
-def check_ariba_reachable():
-    try:
-        r = requests.get("https://service.ariba.com", headers=HEADERS, timeout=10)
-        print(f"✓ Ariba reachable: HTTP {r.status_code}")
-        return True
-    except Exception as e:
-        print(f"✗ Ariba not reachable: {e}")
-        return False
-
-def build_driver(headless=True):
+def build_driver():
     options = Options()
-    if headless:
-        options.add_argument("--headless=new")
+
+    # ❗ FIX: DO NOT use headless (Ariba blocks/empties it)
+    # options.add_argument("--headless=new")
+
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
 
-    service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=options)
+    return webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=options
+    )
 
-def ariba_login(driver, wait):
+def login(driver):
     driver.get("https://service.ariba.com/Authenticator.aw")
 
-    username = wait.until(EC.presence_of_element_located((By.NAME, "UserName")))
-    username.send_keys(ARIBA_USERNAME)
+    WebDriverWait(driver, 20).until(
+        EC.presence_of_element_located((By.NAME, "UserName"))
+    ).send_keys(ARIBA_USERNAME)
 
-    password = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
-    password.send_keys(ARIBA_PASSWORD)
-    password.send_keys(Keys.RETURN)
+    driver.find_element(By.XPATH, "//input[@type='password']").send_keys(
+        ARIBA_PASSWORD + Keys.RETURN
+    )
 
-    time.sleep(5)
+    time.sleep(8)
 
-def scroll_to_load_all(driver):
-    last_count = 0
-    stale_scrolls = 0
-
-    while stale_scrolls < 4:
+def scroll(driver):
+    for _ in range(10):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(2)
 
-        current_count = driver.execute_script("""
-            return document.querySelectorAll('[class*="card"], [class*="lead"], [class*="result"]').length
-        """)
+def parse_cards(html, terms):
+    soup = BeautifulSoup(html, "html.parser")
 
-        if current_count == last_count:
-            stale_scrolls += 1
-        else:
-            stale_scrolls = 0
-            last_count = current_count
+    cards = soup.find_all(text=re.compile(r"\d{10}"))
 
-def parse_cards(soup, search_terms):
     results = []
-    seen_rfi_ids = set()
+    for c in cards:
+        parent = c.parent
+        text = parent.get_text(" ", strip=True)
 
-    rfi_id_elements = soup.find_all(
-        lambda tag: tag.name in ["span", "div", "a"]
-        and re.fullmatch(r'\d{10}', tag.get_text(strip=True))
-    )
-
-    for id_el in rfi_id_elements:
-        rfi_id = id_el.get_text(strip=True)
-        if rfi_id in seen_rfi_ids:
-            continue
-        seen_rfi_ids.add(rfi_id)
-
-        card = id_el
-        for _ in range(8):
-            parent = card.find_parent()
-            if not parent:
-                break
-            if 'Respond By' in parent.get_text(" ", strip=True):
-                card = parent
-                break
-            card = parent
-
-        text = re.sub(r'\s+', ' ', card.get_text(" ", strip=True))
-
-        title_match = re.match(r'^(.+?)\s+(?:RFI|RF[A-Z])\b', text)
-        title = title_match.group(1).strip() if title_match else text[:80]
-
-        deadline = ""
-
-        url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/RfxEvent/preview/{rfi_id}"
-
-        matched_term = next((t for t in search_terms if t.lower() in text.lower()), "")
+        rfi = c.strip()
 
         results.append({
-            "RFI ID": rfi_id,
-            "Lead Title": title,
-            "Respond By": deadline,
-            "URL": url,
-            "Matched Term": matched_term
+            "RFI ID": rfi,
+            "Lead Title": text[:120],
+            "Matched Term": next((t for t in terms if t in text.lower()), "")
         })
 
     return results
 
-def ariba_search_all_rfps(driver, wait, search_terms):
-    encoded = "%20".join(search_terms)
-    url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/leads/search?commodityName={encoded}"
+def search_ariba(driver, terms):
+    query = "%20".join(terms)
+    url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/leads/search?commodityName={query}"
 
     driver.get(url)
-    time.sleep(3)
 
-    scroll_to_load_all(driver)
+    time.sleep(8)  # important wait
 
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    return parse_cards(soup, search_terms)
+    scroll(driver)
 
-# ---------------- MAIN ---------------- #
+    html = driver.page_source
 
-def run_ariba_search(search_terms):
-    if not check_ariba_reachable():
-        return []
+    print("PAGE SIZE:", len(html))  # DEBUG
 
+    return parse_cards(html, terms)
+
+def run_ariba(terms):
     driver = build_driver()
-    wait = WebDriverWait(driver, 20)
-
     try:
-        ariba_login(driver, wait)
-        results = ariba_search_all_rfps(driver, wait, search_terms)
+        login(driver)
+        return search_ariba(driver, terms)
     finally:
         driver.quit()
 
-    return results
+# ---------------- AI FILTER ---------------- #
+
+def ai_filter(leads, index, threshold=0.55):
+    out = []
+
+    for l in leads:
+        l, score = enrich_lead_ai(l, index)
+
+        print("SCORE:", score, l["Lead Title"][:60])
+
+        if score >= threshold:
+            out.append(l)
+
+    return out
+
+# ---------------- MAIN ---------------- #
 
 def main():
-    sheet = connect_spreadsheet()
-    pharma_data = []
+    ss = connect()
+
+    pharma = []
 
     for url, name in URL_SHEET_MAP.items():
         html = fetch(url)
         data = extract_events(html, url)
-        write_to_sheet(get_or_create_worksheet(sheet, name), data)
+        write(get_ws(ss, name), data)
 
         if "pharmaceutical" in name.lower():
-            pharma_data = data
+            pharma = data
 
-    rfps = extract_rfp_numbers(pharma_data)
-    keywords = get_keywords_from_sheet(sheet)
+    rfps = extract_rfp_numbers(pharma)
+    keywords = get_keywords(ss)
 
-    keyword_index = build_keyword_index(keywords)
+    terms = list(set(rfps + keywords))
 
-    search_terms = list(dict.fromkeys(rfps + keywords))
+    print("TERMS:", len(terms))
 
-    print("SEARCH TERMS:", len(search_terms))
+    raw = run_ariba(terms)
 
-    tender_data = run_ariba_search(search_terms)
+    print("RAW RESULTS:", len(raw))
 
-    print("RAW ARIBA RESULTS:", len(tender_data))
+    if not raw:
+        print("❌ Ariba returned empty results")
+        return
 
-    if tender_data:
-        tender_data = ai_filter_leads(tender_data, keyword_index, threshold=0.55)
+    index = build_keyword_index(keywords)
 
-        print("FINAL RESULTS:", len(tender_data))
+    final = ai_filter(raw, index)
 
-        write_to_sheet(
-            get_or_create_worksheet(sheet, TENDER_ALERTS_SHEET),
-            tender_data
-        )
+    print("FINAL:", len(final))
+
+    write(get_ws(ss, TENDER_ALERTS_SHEET), final)
 
 if __name__ == "__main__":
     main()
