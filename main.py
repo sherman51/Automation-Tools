@@ -186,12 +186,6 @@ def build_driver():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-
-    # Stability fixes for Chrome 147+ in CI
-    # Removed: --single-process (crashes Chrome 114+)
-    # Removed: --no-zygote (conflicts with newer Chrome)
-    # Removed: --disable-software-rasterizer (causes issues)
-    # Removed: --remote-debugging-port (conflicts with WebDriver protocol)
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-infobars")
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -216,40 +210,81 @@ def login(driver):
 
     time.sleep(8)
 
-def scroll(driver):
-    for _ in range(10):
+def scroll_to_load(driver):
+    """Scroll incrementally to trigger lazy-loaded cards."""
+    last_height = driver.execute_script("return document.body.scrollHeight")
+    for _ in range(20):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
+        time.sleep(3)
+        new_height = driver.execute_script("return document.body.scrollHeight")
+        if new_height == last_height:
+            print("  📄 Reached end of scroll")
+            break
+        last_height = new_height
 
-def parse_cards(html, terms):
-    soup = BeautifulSoup(html, "html.parser")
-    results = []
+def extract_cards_selenium(driver, terms):
+    """
+    Try to extract cards directly via Selenium using known SAP/Ariba class patterns.
+    Returns a list of results, or None if no card elements were found (triggers fallback).
+    """
     seen = set()
-
-    # Match any ID-like token: uppercase letters/digits, 6+ chars
+    results = []
     id_pattern = re.compile(r'\b[A-Z0-9]{6,}\b')
 
-    for el in soup.find_all(["div", "li", "tr", "span", "td", "article", "section"]):
-        text = el.get_text(" ", strip=True)
+    # Common SAP BN / Fiori card class patterns — ordered by specificity
+    selectors = [
+        "[class*='leadCard']",
+        "[class*='LeadCard']",
+        "[class*='lead-card']",
+        "[class*='sbn-lead']",
+        "[class*='fd-card']",
+        "[class*='sapMListItem']",
+        "[class*='sapMLIB']",
+        "[class*='opportunity']",
+        "[class*='Opportunity']",
+        "[class*='tileContent']",
+        "[class*='TileContent']",
+    ]
 
-        # Skip elements that are too short or too long to be a lead card
-        if len(text) < 10 or len(text) > 2000:
+    elements = []
+    matched_selector = None
+    for sel in selectors:
+        found = driver.find_elements(By.CSS_SELECTOR, sel)
+        if found:
+            print(f"  ✅ Found {len(found)} elements with selector: {sel}")
+            elements = found
+            matched_selector = sel
+            break
+
+    if not elements:
+        print("  ⚠️ No card elements found via Selenium selectors")
+        return None  # signal caller to fall back to BeautifulSoup
+
+    print(f"  Using selector: {matched_selector}")
+
+    for el in elements:
+        try:
+            text = el.text.strip()
+        except Exception:
             continue
 
-        # Deduplicate by first 100 chars of text
-        key = text[:100]
-        if key in seen:
+        # Skip blank, too short, or the results summary line
+        if len(text) < 20:
             continue
-        seen.add(key)
+        if re.search(r'^\d+\s+results?\s+for\b', text, re.IGNORECASE):
+            continue
 
-        # Only keep elements that contain one of our search terms
         matched_term = next((t for t in terms if t.lower() in text.lower()), "")
         if not matched_term:
             continue
 
-        # Extract first ID-like token as the lead ID
         ids = id_pattern.findall(text)
         rfi_id = ids[0] if ids else "N/A"
+
+        key = rfi_id if rfi_id != "N/A" else text[30:130]
+        if key in seen:
+            continue
+        seen.add(key)
 
         results.append({
             "RFI ID": rfi_id,
@@ -257,9 +292,62 @@ def parse_cards(html, terms):
             "Matched Term": matched_term
         })
 
-    print(f"  Found {len(results)} matching cards in this page")
+    print(f"  Found {len(results)} matching cards via Selenium")
+    return results
 
-    # Debug: print page structure sample if nothing matched
+def parse_cards_bs4(html, terms):
+    """
+    BeautifulSoup fallback parser.
+    Only captures leaf-level elements (no matching children) to avoid
+    capturing wrapper/container divs that swallow all child text.
+    Skips the Ariba results summary line.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    seen = set()
+    id_pattern = re.compile(r'\b[A-Z0-9]{6,}\b')
+
+    for el in soup.find_all(["div", "li", "tr", "span", "td", "article", "section"]):
+        text = el.get_text(" ", strip=True)
+
+        if len(text) < 20 or len(text) > 5000:
+            continue
+
+        # Skip the Ariba "X results for ..." summary line
+        if re.search(r'^\d+\s+results?\s+for\b', text, re.IGNORECASE):
+            continue
+
+        matched_term = next((t for t in terms if t.lower() in text.lower()), "")
+        if not matched_term:
+            continue
+
+        # Skip container elements — if a direct child also matches, this is a wrapper
+        child_texts = [
+            c.get_text(" ", strip=True)
+            for c in el.find_all(["div", "li", "article", "section"], recursive=False)
+        ]
+        if any(
+            len(ct) > 20 and any(t.lower() in ct.lower() for t in terms)
+            for ct in child_texts
+        ):
+            continue
+
+        ids = id_pattern.findall(text)
+        rfi_id = ids[0] if ids else "N/A"
+
+        key = rfi_id if rfi_id != "N/A" else text[30:130]
+        if key in seen:
+            continue
+        seen.add(key)
+
+        results.append({
+            "RFI ID": rfi_id,
+            "Lead Title": text[:200],
+            "Matched Term": matched_term
+        })
+
+    print(f"  Found {len(results)} matching cards via BeautifulSoup fallback")
+
     if not results:
         print("  === PAGE STRUCTURE SAMPLE (first 20 non-trivial elements) ===")
         count = 0
@@ -275,45 +363,52 @@ def parse_cards(html, terms):
 
 def search_ariba(driver, terms, batch_size=5):
     all_results = []
-    seen_titles = set()
+    seen_keys = set()
     total_batches = (len(terms) + batch_size - 1) // batch_size
 
     for i in range(0, len(terms), batch_size):
         batch = terms[i:i+batch_size]
         batch_num = i // batch_size + 1
         query = "%20".join(batch)
-        url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/leads/search?commodityName={query}"
+        url = (
+            f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/"
+            f"comsapsbncdiscoveryui#/leads/search?commodityName={query}"
+        )
 
         print(f"\n🔍 Batch {batch_num}/{total_batches}: {batch}")
         driver.get(url)
 
-        # Wait for JS-rendered cards rather than a blind sleep
+        # Wait for any recognisable card/list element to appear
         try:
             WebDriverWait(driver, 30).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR,
-                    "[class*='card'], [class*='lead'], [class*='result'], [class*='item']"
+                    "[class*='leadCard'], [class*='LeadCard'], [class*='lead-card'], "
+                    "[class*='sbn-lead'], [class*='fd-card'], [class*='sapMListItem'], "
+                    "[class*='sapMLIB'], [class*='opportunity'], [class*='tileContent']"
                 ))
             )
-            print("  ✅ Content detected on page")
+            print("  ✅ Card elements detected on page")
         except Exception:
             print("  ⚠️ Timed out waiting for card elements — proceeding anyway")
 
-        scroll(driver)
-        time.sleep(3)
+        scroll_to_load(driver)
 
         html = driver.page_source
         print(f"  PAGE SIZE: {len(html)}")
 
-        batch_results = parse_cards(html, terms)
+        # Try Selenium extraction first; fall back to BeautifulSoup
+        batch_results = extract_cards_selenium(driver, terms)
+        if batch_results is None:
+            batch_results = parse_cards_bs4(html, terms)
 
-        # Deduplicate across batches by Lead Title
+        # Deduplicate across batches
         for r in batch_results:
-            key = r["Lead Title"][:100]
-            if key not in seen_titles:
-                seen_titles.add(key)
+            key = r["RFI ID"] if r["RFI ID"] != "N/A" else r["Lead Title"][30:130]
+            if key not in seen_keys:
+                seen_keys.add(key)
                 all_results.append(r)
 
-    # Save a single debug snapshot of the last page
+    # Save debug snapshot of last page
     try:
         with open("ariba_debug.html", "w", encoding="utf-8") as f:
             f.write(driver.page_source)
@@ -327,13 +422,11 @@ def search_ariba(driver, terms, batch_size=5):
 def run_ariba(terms):
     driver = build_driver()
     try:
-        # Sanity check: make sure driver is alive
         driver.get("about:blank")
         print("✅ Driver OK, title:", driver.title)
 
         login(driver)
 
-        # Verify login succeeded
         current_url = driver.current_url
         page_title = driver.title
         print(f"Post-login URL: {current_url}")
@@ -357,13 +450,12 @@ def run_ariba(terms):
 
 # ---------------- AI FILTER ---------------- #
 
-def ai_filter(leads, index, threshold=0.01):
+def ai_filter(leads, index, threshold=0.55):
     out = []
 
     for l in leads:
         title = l.get("Lead Title", "")
 
-        # If no keyword index available, keep all matched leads as-is
         if not index:
             l["AI_Matched_Keyword"] = "fallback"
             l["AI_Match_Score"] = 1.0
@@ -391,7 +483,7 @@ def main():
         data = extract_events(html, url)
         write(get_ws(ss, name), data)
 
-    # Use only keywords for Ariba search — no RFP number extraction
+    # Use only keywords for Ariba search
     keywords = get_keywords(ss)
 
     if not keywords:
@@ -409,7 +501,6 @@ def main():
         print("❌ Ariba returned empty results")
         return
 
-    # Build index from keywords for semantic scoring
     index = build_keyword_index(terms)
     print(f"KEYWORD INDEX SIZE: {len(index)}")
 
