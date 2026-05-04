@@ -640,26 +640,95 @@ def dump_next_button_html(driver):
             pass
 
 
+def scroll_to_bottom_and_center(driver, el):
+    """
+    Robustly bring a bottom-of-page element fully into the viewport.
+
+    The problem: SAP UI5 renders the Next button at the very bottom of a
+    long scrollable list. In headless Chrome:
+      - scrollIntoView({block:'center'}) scrolls the *document* but the
+        button may live inside a nested scrollable container — so the
+        document scrolls but the button stays clipped.
+      - ActionChains.move_to_element() computes coordinates from the
+        element's getBoundingClientRect(), which returns negative or
+        out-of-viewport values when the container hasn't scrolled.
+
+    Fix: scroll the element's own offsetParent chain, then the document,
+    then pause long enough for UI5 to re-render the toolbar.
+    """
+    # Step 1: scroll every ancestor scrollable container
+    driver.execute_script("""
+        var el = arguments[0];
+        var parent = el.parentElement;
+        while (parent) {
+            var overflow = window.getComputedStyle(parent).overflow +
+                           window.getComputedStyle(parent).overflowY;
+            if (overflow.indexOf('auto') !== -1 || overflow.indexOf('scroll') !== -1) {
+                parent.scrollTop = parent.scrollHeight;
+            }
+            parent = parent.parentElement;
+        }
+    """, el)
+    time.sleep(0.3)
+
+    # Step 2: scroll the document all the way to the bottom
+    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+    time.sleep(0.3)
+
+    # Step 3: now bring the element to the center of the viewport
+    driver.execute_script(
+        "arguments[0].scrollIntoView({block:'center', inline:'center'});", el
+    )
+    time.sleep(0.5)
+
+    # Step 4: verify the element is actually inside the viewport
+    in_view = driver.execute_script("""
+        var el = arguments[0];
+        var r = el.getBoundingClientRect();
+        var vh = window.innerHeight || document.documentElement.clientHeight;
+        var vw = window.innerWidth  || document.documentElement.clientWidth;
+        return r.top >= 0 && r.left >= 0 && r.bottom <= vh && r.right <= vw;
+    """, el)
+
+    if not in_view:
+        # Fallback: use window.scrollBy to nudge the button into view
+        driver.execute_script("""
+            var r = arguments[0].getBoundingClientRect();
+            var vh = window.innerHeight;
+            if (r.bottom > vh) { window.scrollBy(0, r.bottom - vh + 50); }
+            if (r.top < 0)     { window.scrollBy(0, r.top - 50); }
+        """, el)
+        time.sleep(0.3)
+
+    rect = driver.execute_script(
+        "var r=arguments[0].getBoundingClientRect();"
+        "return {top:Math.round(r.top),bottom:Math.round(r.bottom),"
+        "left:Math.round(r.left),right:Math.round(r.right)};", el
+    )
+    print(f"  📐 Button viewport rect: {rect}")
+
+
 def click_next(driver):
     """
     Multi-strategy Next click for SAP UI5 / Ariba.
 
-    SAP UI5 buttons wrap inner <bdi> or <span> elements and sometimes
-    only respond to events dispatched on the inner child, not the outer
-    <button>. Headless Chrome also blocks synthetic JS clicks on some
-    UI5 controls — ActionChains (real mouse events) bypass this.
+    Root cause of failure: the Next button is at the very bottom of the
+    page. In headless Chrome the element is found and 'enabled', but
+    ActionChains click coordinates are computed before the container has
+    finished scrolling, so the click lands outside the button (or on a
+    covering element like a sticky footer).
 
-    Strategy order:
-      1. ActionChains move-and-click on the button (real mouse event)
-      2. ActionChains click on inner <bdi>/<span> child
-      3. JS dispatchEvent MouseEvent on the button
+    Strategy order — each does a fresh scroll before attempting:
+      1. Scroll fully, then ActionChains move+click on button
+      2. Scroll fully, then ActionChains click on inner <bdi>/<span>
+      3. JS dispatchEvent (mousedown/mouseup/click) on button
       4. JS dispatchEvent on inner child
-      5. JS .click() on button (original fallback)
-      6. Keyboard: focus button and press Enter/Space
+      5. JS .click() on button
+      6. Keyboard: focus + Enter
     """
     from selenium.webdriver.common.action_chains import ActionChains
 
-    # Dump HTML on first call so we can see what we're dealing with
+    # Dump HTML once so we can see the exact element structure
     dump_next_button_html(driver)
 
     primary_selectors = [
@@ -691,13 +760,13 @@ def click_next(driver):
         print("  ⏹  No visible+enabled Next button found")
         return False
 
-    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-    time.sleep(0.5)
+    # ── Critical: bring the bottom-of-page button fully into viewport ──
+    scroll_to_bottom_and_center(driver, btn)
 
     # Strategy 1: ActionChains real mouse click on button
     try:
-        ActionChains(driver).move_to_element(btn).click().perform()
-        print(f"  ➡️  [S1] ActionChains click on button ({matched_sel})")
+        ActionChains(driver).move_to_element(btn).pause(0.2).click().perform()
+        print(f"  ➡️  [S1] ActionChains click ({matched_sel})")
         return True
     except Exception as e:
         print(f"  ⚠️  [S1] ActionChains failed: {e}")
@@ -705,13 +774,14 @@ def click_next(driver):
     # Strategy 2: ActionChains click on inner <bdi> or <span> child
     try:
         inner = btn.find_element(By.CSS_SELECTOR, "bdi, span")
-        ActionChains(driver).move_to_element(inner).click().perform()
-        print(f"  ➡️  [S2] ActionChains click on inner child")
+        scroll_to_bottom_and_center(driver, inner)
+        ActionChains(driver).move_to_element(inner).pause(0.2).click().perform()
+        print(f"  ➡️  [S2] ActionChains on inner child")
         return True
     except Exception as e:
-        print(f"  ⚠️  [S2] Inner child ActionChains failed: {e}")
+        print(f"  ⚠️  [S2] Inner ActionChains failed: {e}")
 
-    # Strategy 3: JS dispatchEvent MouseEvent on button
+    # Strategy 3: JS dispatchEvent on button
     try:
         driver.execute_script("""
             var el = arguments[0];
@@ -724,7 +794,7 @@ def click_next(driver):
         print(f"  ➡️  [S3] JS dispatchEvent on button")
         return True
     except Exception as e:
-        print(f"  ⚠️  [S3] JS dispatchEvent failed: {e}")
+        print(f"  ⚠️  [S3] dispatchEvent failed: {e}")
 
     # Strategy 4: JS dispatchEvent on inner child
     try:
@@ -742,20 +812,20 @@ def click_next(driver):
     except Exception as e:
         print(f"  ⚠️  [S4] Inner dispatchEvent failed: {e}")
 
-    # Strategy 5: plain JS .click() (original approach, last resort)
+    # Strategy 5: plain JS .click()
     try:
         driver.execute_script("arguments[0].click();", btn)
-        print(f"  ➡️  [S5] JS .click() on button")
+        print(f"  ➡️  [S5] JS .click()")
         return True
     except Exception as e:
         print(f"  ⚠️  [S5] JS .click() failed: {e}")
 
-    # Strategy 6: keyboard — focus + Enter then Space
+    # Strategy 6: keyboard focus + Enter
     try:
         driver.execute_script("arguments[0].focus();", btn)
         time.sleep(0.2)
         btn.send_keys(Keys.ENTER)
-        print(f"  ➡️  [S6] Keyboard Enter on button")
+        print(f"  ➡️  [S6] Keyboard Enter")
         return True
     except Exception as e:
         print(f"  ⚠️  [S6] Keyboard Enter failed: {e}")
