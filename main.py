@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+import numpy as np
 
 from google.oauth2.service_account import Credentials
 
@@ -16,6 +17,62 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+
+from openai import OpenAI
+
+# ---------------- AI ENGINE INIT ---------------- #
+
+client = OpenAI()
+EMBED_MODEL = "text-embedding-3-small"
+
+def embed(text: str):
+    res = client.embeddings.create(
+        model=EMBED_MODEL,
+        input=text
+    )
+    return np.array(res.data[0].embedding)
+
+def cosine_similarity(a, b):
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+def build_keyword_index(keywords):
+    return {kw: embed(kw) for kw in keywords}
+
+def semantic_match(text, keyword_index):
+    text_vec = embed(text)
+
+    best_kw = None
+    best_score = 0
+
+    for kw, vec in keyword_index.items():
+        score = cosine_similarity(text_vec, vec)
+        if score > best_score:
+            best_score = score
+            best_kw = kw
+
+    return best_kw, round(best_score, 3)
+
+def enrich_lead_ai(lead, keyword_index):
+    text = f"{lead.get('Lead Title','')} {lead.get('Matched Term','')}".strip()
+
+    if not text:
+        text = "unknown"
+
+    kw, score = semantic_match(text, keyword_index)
+
+    lead["AI_Matched_Keyword"] = kw
+    lead["AI_Match_Score"] = score
+
+    # Simple classification layer (can be improved later)
+    t = text.lower()
+    if any(x in t for x in ["drug", "pharma", "medicine", "vaccine"]):
+        lead["AI_Category"] = "Pharma"
+    elif any(x in t for x in ["it", "software", "system", "cloud"]):
+        lead["AI_Category"] = "IT"
+    else:
+        lead["AI_Category"] = "General"
+
+    return lead, score
 
 # ---------------- CONFIG ---------------- #
 
@@ -144,37 +201,34 @@ def get_keywords_from_sheet(spreadsheet):
 
         keywords = [k for k in keywords if k]
 
-        print(f"✓ Loaded {len(keywords)} keywords from KEYWORDS sheet")
+        print(f"✓ Loaded {len(keywords)} keywords")
         return keywords
 
     except Exception as e:
         print(f"⚠️ Could not load KEYWORDS sheet: {e}")
         return []
 
-# ---------------- FILTER ---------------- #
+# ---------------- FILTER (LEGACY - KEPT) ---------------- #
 
 def filter_relevant_leads(leads, keywords):
-    if not leads:
-        return []
+    print("⚠️ Legacy keyword filter still available (not used in AI mode)")
+    return leads
 
+# ---------------- AI FILTER (NEW CORE ENGINE) ---------------- #
+
+def ai_filter_leads(leads, keyword_index, threshold=0.75):
     filtered = []
 
     for lead in leads:
-        title = lead.get("Lead Title", "").lower()
-        matched_term = lead.get("Matched Term", "").lower()
-        text = f"{title} {matched_term}"
+        lead, score = enrich_lead_ai(lead, keyword_index)
 
-        if lead.get("Lead Title") == "Not found":
+        if score >= threshold or lead.get("Lead Title") == "Not found":
             filtered.append(lead)
-            continue
-
-        if any(kw in text for kw in keywords):
-            filtered.append(lead)
-            print(f"  ✓ Kept:    {lead['Lead Title'][:70]}")
+            print(f"✓ KEEP ({score}): {lead['Lead Title'][:70]}")
         else:
-            print(f"  ✗ Dropped: {lead['Lead Title'][:70]}")
+            print(f"✗ DROP ({score}): {lead['Lead Title'][:70]}")
 
-    print(f"✓ Keyword filter: {len(leads)} → {len(filtered)} relevant")
+    print(f"AI Filtered: {len(filtered)}/{len(leads)} kept")
     return filtered
 
 # ---------------- ARIBA ---------------- #
@@ -220,12 +274,6 @@ def scroll_to_load_all(driver):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(2)
 
-        driver.execute_script("""
-            let containers = document.querySelectorAll('[class*="scroll"], [class*="list"], [class*="results"]');
-            containers.forEach(el => el.scrollTop = el.scrollHeight);
-        """)
-        time.sleep(1)
-
         current_count = driver.execute_script("""
             return document.querySelectorAll('[class*="card"], [class*="lead"], [class*="result"]').length
         """)
@@ -240,10 +288,9 @@ def parse_cards(soup, search_terms):
     results = []
     seen_rfi_ids = set()
 
-    # Target RFI ID spans/links directly — they're short and unique
     rfi_id_elements = soup.find_all(
         lambda tag: tag.name in ["span", "div", "a"]
-        and re.fullmatch(r'\d{10}', tag.get_text(strip=True))  # Ariba RFI IDs are 10-digit
+        and re.fullmatch(r'\d{10}', tag.get_text(strip=True))
     )
 
     for id_el in rfi_id_elements:
@@ -252,22 +299,18 @@ def parse_cards(soup, search_terms):
             continue
         seen_rfi_ids.add(rfi_id)
 
-        # Walk up to the card container
         card = id_el
         for _ in range(8):
             parent = card.find_parent()
             if not parent:
                 break
-            parent_text = parent.get_text(" ", strip=True)
-            # Stop when we have a self-contained card (has title + deadline)
-            if 'Respond By' in parent_text and len(parent_text) < 2000:
+            if 'Respond By' in parent.get_text(" ", strip=True):
                 card = parent
                 break
             card = parent
 
         text = re.sub(r'\s+', ' ', card.get_text(" ", strip=True))
 
-        # Extract title — everything before "RFI" or the RFI ID
         title_match = re.match(r'^(.+?)\s+(?:RFI|RF[A-Z])\b', text)
         title = title_match.group(1).strip() if title_match else text[:80]
 
@@ -275,6 +318,7 @@ def parse_cards(soup, search_terms):
         deadline = deadline_match.group(1).strip() if deadline_match else ""
 
         url = f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/RfxEvent/preview/{rfi_id}"
+
         matched_term = next((t for t in search_terms if t.lower() in text.lower()), "")
 
         results.append({
@@ -331,12 +375,14 @@ def main():
     rfps = extract_rfp_numbers(pharma_data)
     keywords = get_keywords_from_sheet(sheet)
 
-    all_search_terms = list(dict.fromkeys(rfps + keywords))
+    keyword_index = build_keyword_index(keywords)
 
-    tender_data = run_ariba_search(all_search_terms)
+    search_terms = list(dict.fromkeys(rfps + keywords))
+
+    tender_data = run_ariba_search(search_terms)
 
     if tender_data:
-        tender_data = filter_relevant_leads(tender_data, keywords)
+        tender_data = ai_filter_leads(tender_data, keyword_index, threshold=0.75)
 
         write_to_sheet(
             get_or_create_worksheet(sheet, TENDER_ALERTS_SHEET),
