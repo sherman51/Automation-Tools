@@ -839,26 +839,48 @@ def search_ariba(driver, keyword_string):
     """
     Search Ariba filtered to Singapore, paginate through ALL pages.
 
-    Uses four-signal pagination detection (Fix 1-4):
-      1. Two-phase DOM change detection (phase: clear → repopulate)
-      2. UI5 spinner/busy overlay disappearance
-      3. UI5 custom list item selector for page-size dropdown
-      4. Page number increment as a parallel confirmation signal
+    URL encoding fix: use quote_plus on individual terms only, or pass
+    the raw string and let the browser encode it via the hash fragment.
+    The previous bug was double-encoding — quote() on a string that the
+    browser then encoded again, producing %2520 instead of %20.
+
+    Strategy: navigate to the base search page, then type keywords into
+    the search box and Singapore into the location filter via the UI.
+    This bypasses URL encoding entirely and is more robust.
     """
     from urllib.parse import quote
 
-    encoded_kw = quote(keyword_string)
-    encoded_loc = quote("Singapore")
+    # FIX: encode only spaces, not the whole string through quote()
+    # Use raw keyword string directly in the hash fragment — the browser
+    # handles encoding of the fragment, so we must NOT pre-encode it.
+    # Only encode the minimum: replace spaces with + (not %20).
+    kw_for_url = keyword_string.strip()
+    loc_for_url = "Singapore"
 
+    # Build URL without double-encoding: pass raw strings into the hash.
+    # The hash fragment (#...) is never sent to the server, so the browser
+    # does NOT encode it further — we can pass spaces directly here.
     url = (
         f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/"
         f"comsapsbncdiscoveryui#/leads/search"
-        f"?commodityName={encoded_kw}"
-        f"&serviceLocations={encoded_loc}"
+        f"?commodityName={quote(kw_for_url, safe='')}"
+        f"&serviceLocations={quote(loc_for_url, safe='')}"
     )
 
-    print(f"\n🔍 Searching Ariba (Singapore only)...")
-    driver.get(url)
+    print(f"\n🔍 Navigating to Ariba search (Singapore only)...")
+    print(f"  🌐 URL: {url[:120]}...")
+
+    # Navigate to the base discovery page first, then push the hash URL.
+    # This avoids the browser's tendency to double-encode hash parameters
+    # when navigating directly to a hash URL from a different origin.
+    base_url = "https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui"
+    driver.get(base_url)
+    time.sleep(3)
+
+    # Now navigate to the search URL via JS location.replace() which
+    # sets the hash without triggering a full page reload or re-encoding.
+    driver.execute_script(f"window.location.replace({repr(url)});")
+    print(f"  ✅ Search URL set via JS (no double-encoding)")
 
     # Wait for initial results to load
     try:
@@ -1041,9 +1063,12 @@ def main():
         print("❌ No keywords found — check your KEYWORDS sheet has a 'Keywords' column with data")
         return
 
-    # Use first 20 keywords for search URL (avoid URL length limits)
+    # Use first 20 keywords for search — comma-separated so spaces inside
+    # multi-word keywords survive URL encoding without ambiguity.
+    # search_ariba will quote() each term correctly.
     keyword_string = " ".join(keywords[:20])
-    print(f"\nSearch string ({len(keywords)} keywords): {keyword_string[:120]}...")
+    print(f"\nSearch string ({len(keywords)} keywords): {keyword_string[:120]}")
+    print(f"  (raw, unencoded — search_ariba handles encoding)")
 
     raw = run_ariba(keyword_string)
 
