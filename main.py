@@ -188,17 +188,22 @@ def get_keywords(ss):
 def build_driver():
     options = Options()
 
-    # ❗ FIX: DO NOT use headless (Ariba blocks/empties it)
-    # options.add_argument("--headless=new")
-
+    # REQUIRED for GitHub Actions stability
+    options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--remote-debugging-port=9222")
     options.add_argument("--window-size=1920,1080")
 
-    return webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=options
-    )
+    # prevents random crashes in CI
+    options.add_argument("--single-process")
+    options.add_argument("--no-zygote")
+
+    service = Service(ChromeDriverManager().install())
+
+    return webdriver.Chrome(service=service, options=options)
 
 def login(driver):
     driver.get("https://service.ariba.com/Authenticator.aw")
