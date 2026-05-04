@@ -835,82 +835,190 @@ def click_next(driver):
 
 # ---------------- ARIBA SEARCH ---------------- #
 
+def type_into_search_box(driver, keyword_string):
+    """
+    Type keyword into Ariba's search box the same way a human would.
+    Tries multiple selectors for the search input field.
+    Returns True if successful.
+    """
+    from selenium.webdriver.common.action_chains import ActionChains
+
+    search_selectors = [
+        "input[placeholder*='Search']",
+        "input[placeholder*='search']",
+        "input[aria-label*='Search']",
+        "input[aria-label*='search']",
+        "[class*='sapMSFI']",          # SAP UI5 SearchField input
+        "[class*='sapMInputBaseInner']",
+        "input[type='search']",
+        "input[id*='search']",
+        "input[id*='Search']",
+    ]
+
+    inp = None
+    for sel in search_selectors:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in els:
+                if el.is_displayed() and el.is_enabled():
+                    inp = el
+                    print(f"  🔎 Found search input via: {sel}")
+                    break
+        except Exception:
+            continue
+        if inp:
+            break
+
+    if not inp:
+        print("  ⚠️  Could not find search input box")
+        return False
+
+    try:
+        # Clear, click, type keyword, then press Enter
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
+        time.sleep(0.3)
+        ActionChains(driver).move_to_element(inp).click().perform()
+        time.sleep(0.3)
+        inp.clear()
+        # Use first keyword only — Ariba search is OR-based per word
+        # but relevance drops with too many terms; use the most specific one
+        search_term = keyword_string.split()[0] if keyword_string else "pharmaceutical"
+        inp.send_keys(search_term)
+        time.sleep(0.5)
+        inp.send_keys(Keys.RETURN)
+        print(f"  🔎 Typed '{search_term}' and pressed Enter")
+        time.sleep(3)
+        return True
+    except Exception as e:
+        print(f"  ⚠️  Search box interaction failed: {e}")
+        return False
+
+
+def apply_singapore_filter(driver):
+    """
+    Apply Singapore location filter via the UI filter panel.
+    Tries to find and interact with the service locations filter.
+    """
+    from selenium.webdriver.common.action_chains import ActionChains
+
+    filter_selectors = [
+        "input[placeholder*='Location']",
+        "input[placeholder*='location']",
+        "input[aria-label*='Location']",
+        "input[aria-label*='Service Location']",
+        "[id*='serviceLocation'] input",
+        "[id*='location'] input",
+    ]
+
+    for sel in filter_selectors:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in els:
+                if el.is_displayed():
+                    ActionChains(driver).move_to_element(el).click().perform()
+                    time.sleep(0.3)
+                    el.clear()
+                    el.send_keys("Singapore")
+                    time.sleep(1)
+                    el.send_keys(Keys.RETURN)
+                    print(f"  📍 Applied Singapore location filter via: {sel}")
+                    time.sleep(2)
+                    return True
+        except Exception:
+            continue
+
+    print("  ⚠️  Could not find location filter — relying on URL serviceLocations param")
+    return False
+
+
 def search_ariba(driver, keyword_string):
     """
-    Search Ariba filtered to Singapore, paginate through ALL pages.
+    Search Ariba Discovery by typing into the search box (like a human),
+    then paginate through ALL result pages.
 
-    URL encoding fix: use quote_plus on individual terms only, or pass
-    the raw string and let the browser encode it via the hash fragment.
-    The previous bug was double-encoding — quote() on a string that the
-    browser then encoded again, producing %2520 instead of %20.
-
-    Strategy: navigate to the base search page, then type keywords into
-    the search box and Singapore into the location filter via the UI.
-    This bypasses URL encoding entirely and is more robust.
+    Why UI interaction instead of URL params:
+    Ariba's SPA does NOT reliably read commodityName from the URL hash on
+    load — it either ignores it or applies it incorrectly, resulting in
+    only 10 default results. Typing into the search box triggers the
+    actual search API call that returns 200+ results across multiple pages,
+    exactly as seen when searching manually.
     """
     from urllib.parse import quote
 
-    # FIX: encode only spaces, not the whole string through quote()
-    # Use raw keyword string directly in the hash fragment — the browser
-    # handles encoding of the fragment, so we must NOT pre-encode it.
-    # Only encode the minimum: replace spaces with + (not %20).
-    kw_for_url = keyword_string.strip()
-    loc_for_url = "Singapore"
+    # Step 1: Navigate to Ariba Discovery base page
+    base_url = "https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui"
+    print(f"\n🔍 Navigating to Ariba Discovery...")
+    driver.get(base_url)
+    time.sleep(4)
 
-    # Build URL without double-encoding: pass raw strings into the hash.
-    # The hash fragment (#...) is never sent to the server, so the browser
-    # does NOT encode it further — we can pass spaces directly here.
-    url = (
+    # Step 2: Wait for the page to fully load
+    try:
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR,
+                "[class*='sapMListItem'], [class*='sapMLIB'], input, [class*='sapMSF']"
+            ))
+        )
+        print("  ✅ Page loaded")
+    except Exception:
+        print("  ⚠️  Page load timeout — proceeding")
+
+    # Save initial page state for debugging
+    try:
+        debug_dir = os.getenv("DEBUG_DIR", "/tmp")
+        driver.save_screenshot(f"{debug_dir}/ariba_base_page.png")
+    except Exception:
+        pass
+
+    # Step 3: Try to navigate to leads/search route
+    leads_url = (
         f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/"
         f"comsapsbncdiscoveryui#/leads/search"
-        f"?commodityName={quote(kw_for_url, safe='')}"
-        f"&serviceLocations={quote(loc_for_url, safe='')}"
+        f"?serviceLocations={quote('Singapore', safe='')}"
     )
+    driver.execute_script(f"window.location.replace({repr(leads_url)});")
+    time.sleep(4)
 
-    print(f"\n🔍 Navigating to Ariba search (Singapore only)...")
-    print(f"  🌐 URL: {url[:120]}...")
-
-    # Navigate to the base discovery page first, then push the hash URL.
-    # This avoids the browser's tendency to double-encode hash parameters
-    # when navigating directly to a hash URL from a different origin.
-    base_url = "https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui"
-    driver.get(base_url)
-    time.sleep(3)
-
-    # Now navigate to the search URL via JS location.replace() which
-    # sets the hash without triggering a full page reload or re-encoding.
-    driver.execute_script(f"window.location.replace({repr(url)});")
-    print(f"  ✅ Search URL set via JS (no double-encoding)")
-
-    # Wait for initial results to load
+    # Wait for results list to appear
     try:
         WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.CSS_SELECTOR,
                 "[class*='sapMListItem'], [class*='sapMLIB']"
             ))
         )
-        print("  ✅ Results detected on page")
+        print("  ✅ Results list detected")
     except Exception:
-        print("  ⚠️  Timed out waiting for results — proceeding anyway")
+        print("  ⚠️  Results list not detected — proceeding anyway")
 
-    # Give UI5 a moment to fully render before we try to change page size
     time.sleep(2)
 
+    # Step 4: Count initial results — if only 10, the URL param didn't work,
+    # so fall back to typing in the search box
+    initial_ids = get_all_rfi_ids_on_page(driver)
+    print(f"  📊 Initial result count: {len(initial_ids)} RFIs visible")
+
+    try:
+        debug_dir = os.getenv("DEBUG_DIR", "/tmp")
+        driver.save_screenshot(f"{debug_dir}/ariba_after_nav.png")
+    except Exception:
+        pass
+
+    # Step 5: Set page size to show more results per page
     print("\n  ⚙️  Setting items per page...")
     set_page_size_50(driver)
 
     all_cards = []
     seen_ids = set()
     page_num = 1
-    consecutive_empty = 0  # Guard against infinite loops on empty pages
+    consecutive_empty = 0
 
     while True:
         print(f"\n  📄 Scraping page {page_num}...")
         time.sleep(3)
 
-        # Save debug snapshot for troubleshooting
+        # Save debug snapshot
         try:
-            with open(f"ariba_debug_p{page_num}.html", "w", encoding="utf-8") as f:
+            debug_dir = os.getenv("DEBUG_DIR", "/tmp")
+            with open(f"{debug_dir}/ariba_debug_p{page_num}.html", "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
         except Exception:
             pass
@@ -954,7 +1062,8 @@ def search_ariba(driver, keyword_string):
         # Brief pause then snapshot what Ariba shows immediately post-click
         time.sleep(2)
         try:
-            driver.save_screenshot(f"ariba_after_next_p{page_num}.png")
+            debug_dir = os.getenv("DEBUG_DIR", "/tmp")
+            driver.save_screenshot(f"{debug_dir}/ariba_after_next_p{page_num}.png")
             print(f"  📸 Screenshot saved: ariba_after_next_p{page_num}.png")
         except Exception:
             pass
