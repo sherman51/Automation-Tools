@@ -18,27 +18,25 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
-from openai import OpenAI
+# ---------------- FREE AI ENGINE (LOCAL EMBEDDINGS) ---------------- #
 
-# ---------------- AI ENGINE INIT ---------------- #
+from sentence_transformers import SentenceTransformer
 
-client = OpenAI()
-EMBED_MODEL = "text-embedding-3-small"
+# lightweight model (fast + good enough for procurement matching)
+MODEL = SentenceTransformer("all-MiniLM-L6-v2")
 
-def embed(text: str):
-    res = client.embeddings.create(
-        model=EMBED_MODEL,
-        input=text
-    )
-    return np.array(res.data[0].embedding)
+def embed(text):
+    return MODEL.encode(text)
 
 def cosine_similarity(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 def build_keyword_index(keywords):
+    """Precompute keyword embeddings once"""
     return {kw: embed(kw) for kw in keywords}
 
 def semantic_match(text, keyword_index):
+    """Find best matching keyword using cosine similarity"""
     text_vec = embed(text)
 
     best_kw = None
@@ -46,6 +44,7 @@ def semantic_match(text, keyword_index):
 
     for kw, vec in keyword_index.items():
         score = cosine_similarity(text_vec, vec)
+
         if score > best_score:
             best_score = score
             best_kw = kw
@@ -53,9 +52,9 @@ def semantic_match(text, keyword_index):
     return best_kw, round(best_score, 3)
 
 def enrich_lead_ai(lead, keyword_index):
-    text = f"{lead.get('Lead Title','')} {lead.get('Matched Term','')}".strip()
+    text = f"{lead.get('Lead Title','')} {lead.get('Matched Term','')}"
 
-    if not text:
+    if not text.strip():
         text = "unknown"
 
     kw, score = semantic_match(text, keyword_index)
@@ -63,11 +62,11 @@ def enrich_lead_ai(lead, keyword_index):
     lead["AI_Matched_Keyword"] = kw
     lead["AI_Match_Score"] = score
 
-    # Simple classification layer (can be improved later)
+    # simple classification layer
     t = text.lower()
-    if any(x in t for x in ["drug", "pharma", "medicine", "vaccine"]):
+    if any(x in t for x in ["drug", "pharma", "medicine", "vaccine", "clinical"]):
         lead["AI_Category"] = "Pharma"
-    elif any(x in t for x in ["it", "software", "system", "cloud"]):
+    elif any(x in t for x in ["it", "software", "system", "cloud", "digital"]):
         lead["AI_Category"] = "IT"
     else:
         lead["AI_Category"] = "General"
@@ -208,13 +207,12 @@ def get_keywords_from_sheet(spreadsheet):
         print(f"⚠️ Could not load KEYWORDS sheet: {e}")
         return []
 
-# ---------------- FILTER (LEGACY - KEPT) ---------------- #
+# ---------------- LEGACY FILTER (kept unchanged) ---------------- #
 
 def filter_relevant_leads(leads, keywords):
-    print("⚠️ Legacy keyword filter still available (not used in AI mode)")
     return leads
 
-# ---------------- AI FILTER (NEW CORE ENGINE) ---------------- #
+# ---------------- AI FILTER (CORE ENGINE) ---------------- #
 
 def ai_filter_leads(leads, keyword_index, threshold=0.75):
     filtered = []
@@ -231,7 +229,7 @@ def ai_filter_leads(leads, keyword_index, threshold=0.75):
     print(f"AI Filtered: {len(filtered)}/{len(leads)} kept")
     return filtered
 
-# ---------------- ARIBA ---------------- #
+# ---------------- ARIBA (UNCHANGED) ---------------- #
 
 def check_ariba_reachable():
     try:
@@ -389,7 +387,7 @@ def main():
             tender_data
         )
 
-        print(f"✓ Written {len(tender_data)} rows to '{TENDER_ALERTS_SHEET}'")
+        print(f"✓ Written {len(tender_data)} rows")
 
 if __name__ == "__main__":
     main()
