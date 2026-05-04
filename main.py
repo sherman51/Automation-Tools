@@ -357,7 +357,7 @@ def run_ariba(terms):
 
 # ---------------- AI FILTER ---------------- #
 
-def ai_filter(leads, index, threshold=0.55):
+def ai_filter(leads, index, threshold=0.01):
     out = []
 
     for l in leads:
