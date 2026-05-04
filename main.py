@@ -165,6 +165,14 @@ def write(ws, data):
 # ---------------- KEYWORDS ---------------- #
 
 def get_keywords(ss):
+    """
+    FIX 1: Load keywords from the KEYWORDS sheet and split them properly.
+
+    Handles all common separators (comma, semicolon, newline, space) so that
+    even if all keywords are pasted into a single cell, they are returned as
+    individual tokens — giving the semantic index multiple focused vectors
+    instead of one diluted mega-vector.
+    """
     try:
         ws = ss.worksheet("KEYWORDS")
         raw = [
@@ -172,16 +180,33 @@ def get_keywords(ss):
             for r in ws.get_all_records()
             if r.get("Keywords")
         ]
-        # Handle keywords stored as one long comma/semicolon/newline separated string
         kws = []
         for entry in raw:
+            # Split on comma, semicolon, or newline first
             parts = re.split(r'[,;\n]+', entry)
             for p in parts:
                 p = p.strip().lower()
                 if p:
-                    kws.append(p)
-        print(f"✅ Loaded {len(kws)} keywords: {kws[:5]}")
-        return kws
+                    # If a part still looks like a long phrase, split on spaces too
+                    # so "cold chain storage" → ["cold chain storage"] (kept as phrase)
+                    # but a 100-word blob → individual meaningful phrases
+                    if len(p.split()) > 6:
+                        # Split long blobs into individual words/short phrases
+                        sub_parts = p.split()
+                        kws.extend(sub_parts)
+                    else:
+                        kws.append(p)
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_kws = []
+        for k in kws:
+            if k not in seen:
+                seen.add(k)
+                unique_kws.append(k)
+
+        print(f"✅ Loaded {len(unique_kws)} keywords: {unique_kws[:10]}")
+        return unique_kws
     except Exception as e:
         print(f"⚠️ Could not load KEYWORDS sheet: {e}")
         return []
@@ -236,27 +261,16 @@ def parse_ariba_cards(html):
     """
     Parse Ariba lead cards from the page HTML.
 
-    Based on observed page structure, each card contains:
-      - Title line (e.g. "NHGGO-RFI-GFN-FY25-369 NHG HEALTH Cluster Supply Chain Transformation")
-      - Type + RFI number line (e.g. "RFI   ·   1110009226")
-      - Service locations
-      - Category
-      - Max Budget
-      - Respond By date
-
-    We identify card boundaries by the "RFI · <number>" pattern and extract
-    the block of text around each one.
+    FIX 4: Added minimum title length guard (len >= 10) to prevent
+    truncated page fragments like "spital" from being treated as lead titles.
     """
     soup = BeautifulSoup(html, "html.parser")
     full_text = soup.get_text("\n", strip=True)
 
     cards = []
 
-    # Split the full page text into blocks by the RFI·number pattern
-    # Pattern: "RFI   ·   1110009226" or "RFI · 1110009226"
     rfi_pattern = re.compile(r'(RFI\s*[·•]\s*(\d{7,12}))', re.IGNORECASE)
 
-    # Find all RFI markers and their positions
     matches = list(rfi_pattern.finditer(full_text))
 
     print(f"  Found {len(matches)} RFI markers in page text")
@@ -264,17 +278,12 @@ def parse_ariba_cards(html):
     for idx, match in enumerate(matches):
         rfi_id = match.group(2).strip()
 
-        # Grab text before this RFI marker (the title is just above it)
         start = max(0, match.start() - 300)
         end = matches[idx + 1].start() if idx + 1 < len(matches) else match.end() + 500
         block = full_text[start:end].strip()
 
-        # Extract lines from the block
         lines = [l.strip() for l in block.split("\n") if l.strip()]
 
-        # Title is typically the line just before "RFI · <number>"
-        # Find the line index of the RFI marker
-        rfi_line_text = match.group(1)
         title = ""
         category = ""
         location = ""
@@ -283,12 +292,10 @@ def parse_ariba_cards(html):
 
         for i, line in enumerate(lines):
             if rfi_pattern.search(line):
-                # Title is the line before the RFI line
                 if i > 0:
                     title = lines[i - 1]
                 break
 
-        # Extract structured fields from the block
         for line in lines:
             ll = line.lower()
             if ll.startswith("category:"):
@@ -300,7 +307,10 @@ def parse_ariba_cards(html):
             elif ll.startswith("respond by:"):
                 respond_by = line[len("respond by:"):].strip()
 
-        if not title:
+        # FIX 4: Skip cards with no title or suspiciously short titles
+        # (e.g. "spital" is a fragment of "hospital" from a page split)
+        if not title or len(title) < 10:
+            print(f"  ⚠️  Skipping card with invalid title: '{title}' (RFI {rfi_id})")
             continue
 
         cards.append({
@@ -329,7 +339,6 @@ def search_ariba(driver, keyword_string):
     print(f"\n🔍 Searching Ariba...")
     driver.get(url)
 
-    # Wait for results to load
     try:
         WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.CSS_SELECTOR,
@@ -353,7 +362,6 @@ def search_ariba(driver, keyword_string):
         html = driver.page_source
         print(f"  PAGE SIZE: {len(html)}")
 
-        # Save debug snapshot
         try:
             with open(f"ariba_debug_p{page_num}.html", "w", encoding="utf-8") as f:
                 f.write(html)
@@ -376,7 +384,6 @@ def search_ariba(driver, keyword_string):
             print("  No new cards — stopping pagination")
             break
 
-        # Try to click the "Next" pagination button
         try:
             next_btn = driver.find_element(By.CSS_SELECTOR,
                 "[class*='sapMPaginatorNext'], "
@@ -429,7 +436,15 @@ def run_ariba(keyword_string):
 
 # ---------------- AI FILTER ---------------- #
 
-def ai_filter(leads, index, threshold=0.45):
+def ai_filter(leads, index, threshold=0.35):
+    """
+    FIX 2: Lowered threshold from 0.45 → 0.35.
+
+    With many focused keyword vectors in the index, scores are distributed
+    more granularly. 0.45 was too aggressive and cut genuinely relevant leads
+    like "SA-THIRD PARTY LOGISTICS" (scored 0.391). 0.35 catches those while
+    still filtering clearly unrelated results (scores near 0).
+    """
     out = []
 
     for l in leads:
@@ -470,16 +485,30 @@ def main():
         print("❌ No keywords found — check your KEYWORDS sheet has a 'Keywords' column with data")
         return
 
-    # Join all keywords into one search string — exactly as you'd type in the search bar
-    keyword_string = " ".join(keywords)
+    # FIX 3: Deduplicate raw leads by RFI ID before scoring,
+    # so duplicate cards from pagination don't inflate the results
+    # or waste embedding compute.
+    keyword_string = " ".join(keywords[:20])  # Use first 20 for the search URL (avoid URL length limits)
     print(f"\nSearch string ({len(keywords)} keywords): {keyword_string[:120]}...")
 
-    # Run Ariba search and scrape all result cards
     raw = run_ariba(keyword_string)
 
-    print(f"\nRAW RESULTS: {len(raw)}")
+    print(f"\nRAW RESULTS (before dedup): {len(raw)}")
 
-    if not raw:
+    # FIX 3: Deduplicate by RFI ID
+    seen = set()
+    deduped = []
+    for r in raw:
+        rid = r.get("RFI ID", "")
+        if rid and rid not in seen:
+            seen.add(rid)
+            deduped.append(r)
+        elif not rid:
+            deduped.append(r)  # Keep leads without an ID (won't be skipped silently)
+
+    print(f"AFTER DEDUP: {len(deduped)}")
+
+    if not deduped:
         print("❌ Ariba returned empty results")
         return
 
@@ -487,7 +516,7 @@ def main():
     index = build_keyword_index(keywords)
     print(f"KEYWORD INDEX SIZE: {len(index)}")
 
-    final = ai_filter(raw, index)
+    final = ai_filter(deduped, index)
 
     print(f"FINAL: {len(final)}")
 
