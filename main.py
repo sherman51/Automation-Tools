@@ -50,7 +50,7 @@ def semantic_match(text, keyword_index):
     return best_kw, round(best_score, 3)
 
 def enrich_lead_ai(lead, keyword_index):
-    text = f"{lead.get('Lead Title','')} {lead.get('Matched Term','')}".strip()
+    text = f"{lead.get('Lead Title','')} {lead.get('Category','')} {lead.get('Matched Term','')}".strip()
     if not text:
         text = "unknown"
 
@@ -60,9 +60,11 @@ def enrich_lead_ai(lead, keyword_index):
     lead["AI_Match_Score"] = score
 
     t = text.lower()
-    if any(x in t for x in ["drug", "pharma", "vaccine", "clinical"]):
-        lead["AI_Category"] = "Pharma"
-    elif any(x in t for x in ["it", "software", "cloud", "system"]):
+    if any(x in t for x in ["drug", "pharma", "vaccine", "clinical", "medical", "hospital"]):
+        lead["AI_Category"] = "Pharma/Medical"
+    elif any(x in t for x in ["logistics", "supply chain", "warehouse", "distribution", "cold chain"]):
+        lead["AI_Category"] = "Logistics"
+    elif any(x in t for x in ["it", "software", "cloud", "system", "digital"]):
         lead["AI_Category"] = "IT"
     else:
         lead["AI_Category"] = "General"
@@ -165,11 +167,19 @@ def write(ws, data):
 def get_keywords(ss):
     try:
         ws = ss.worksheet("KEYWORDS")
-        kws = [
-            (r.get("Keywords") or "").strip().lower()
+        raw = [
+            (r.get("Keywords") or "").strip()
             for r in ws.get_all_records()
             if r.get("Keywords")
         ]
+        # Handle keywords stored as one long comma/semicolon/newline separated string
+        kws = []
+        for entry in raw:
+            parts = re.split(r'[,;\n]+', entry)
+            for p in parts:
+                p = p.strip().lower()
+                if p:
+                    kws.append(p)
         print(f"✅ Loaded {len(kws)} keywords: {kws[:5]}")
         return kws
     except Exception as e:
@@ -213,7 +223,7 @@ def login(driver):
 def scroll_to_load(driver):
     """Scroll incrementally to trigger lazy-loaded cards."""
     last_height = driver.execute_script("return document.body.scrollHeight")
-    for _ in range(20):
+    for _ in range(30):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(3)
         new_height = driver.execute_script("return document.body.scrollHeight")
@@ -222,221 +232,190 @@ def scroll_to_load(driver):
             break
         last_height = new_height
 
-def extract_cards_selenium(driver, terms):
+def parse_ariba_cards(html):
     """
-    Try to extract cards directly via Selenium using known SAP/Ariba class patterns.
-    Returns a list of results, or None if no card elements were found (triggers fallback).
-    """
-    seen = set()
-    results = []
-    id_pattern = re.compile(r'\b[A-Z0-9]{6,}\b')
+    Parse Ariba lead cards from the page HTML.
 
-    # Common SAP BN / Fiori card class patterns — ordered by specificity
-    selectors = [
-        "[class*='leadCard']",
-        "[class*='LeadCard']",
-        "[class*='lead-card']",
-        "[class*='sbn-lead']",
-        "[class*='fd-card']",
-        "[class*='sapMListItem']",
-        "[class*='sapMLIB']",
-        "[class*='opportunity']",
-        "[class*='Opportunity']",
-        "[class*='tileContent']",
-        "[class*='TileContent']",
-    ]
+    Based on observed page structure, each card contains:
+      - Title line (e.g. "NHGGO-RFI-GFN-FY25-369 NHG HEALTH Cluster Supply Chain Transformation")
+      - Type + RFI number line (e.g. "RFI   ·   1110009226")
+      - Service locations
+      - Category
+      - Max Budget
+      - Respond By date
 
-    elements = []
-    matched_selector = None
-    for sel in selectors:
-        found = driver.find_elements(By.CSS_SELECTOR, sel)
-        if found:
-            print(f"  ✅ Found {len(found)} elements with selector: {sel}")
-            elements = found
-            matched_selector = sel
-            break
-
-    if not elements:
-        print("  ⚠️ No card elements found via Selenium selectors")
-        return None  # signal caller to fall back to BeautifulSoup
-
-    print(f"  Using selector: {matched_selector}")
-
-    for el in elements:
-        try:
-            text = el.text.strip()
-        except Exception:
-            continue
-
-        # Skip blank, too short, or the results summary line
-        if len(text) < 20:
-            continue
-        if re.search(r'^\d+\s+results?\s+for\b', text, re.IGNORECASE):
-            continue
-
-        matched_term = next((t for t in terms if t.lower() in text.lower()), "")
-        if not matched_term:
-            continue
-
-        ids = id_pattern.findall(text)
-        rfi_id = ids[0] if ids else "N/A"
-
-        key = rfi_id if rfi_id != "N/A" else text[30:130]
-        if key in seen:
-            continue
-        seen.add(key)
-
-        results.append({
-            "RFI ID": rfi_id,
-            "Lead Title": text[:200],
-            "Matched Term": matched_term
-        })
-
-    print(f"  Found {len(results)} matching cards via Selenium")
-    return results
-
-def parse_cards_bs4(html, terms):
-    """
-    BeautifulSoup fallback parser.
-    Only captures leaf-level elements (no matching children) to avoid
-    capturing wrapper/container divs that swallow all child text.
-    Skips the Ariba results summary line.
+    We identify card boundaries by the "RFI · <number>" pattern and extract
+    the block of text around each one.
     """
     soup = BeautifulSoup(html, "html.parser")
-    results = []
-    seen = set()
-    id_pattern = re.compile(r'\b[A-Z0-9]{6,}\b')
+    full_text = soup.get_text("\n", strip=True)
 
-    for el in soup.find_all(["div", "li", "tr", "span", "td", "article", "section"]):
-        text = el.get_text(" ", strip=True)
+    cards = []
 
-        if len(text) < 20 or len(text) > 5000:
+    # Split the full page text into blocks by the RFI·number pattern
+    # Pattern: "RFI   ·   1110009226" or "RFI · 1110009226"
+    rfi_pattern = re.compile(r'(RFI\s*[·•]\s*(\d{7,12}))', re.IGNORECASE)
+
+    # Find all RFI markers and their positions
+    matches = list(rfi_pattern.finditer(full_text))
+
+    print(f"  Found {len(matches)} RFI markers in page text")
+
+    for idx, match in enumerate(matches):
+        rfi_id = match.group(2).strip()
+
+        # Grab text before this RFI marker (the title is just above it)
+        start = max(0, match.start() - 300)
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else match.end() + 500
+        block = full_text[start:end].strip()
+
+        # Extract lines from the block
+        lines = [l.strip() for l in block.split("\n") if l.strip()]
+
+        # Title is typically the line just before "RFI · <number>"
+        # Find the line index of the RFI marker
+        rfi_line_text = match.group(1)
+        title = ""
+        category = ""
+        location = ""
+        budget = ""
+        respond_by = ""
+
+        for i, line in enumerate(lines):
+            if rfi_pattern.search(line):
+                # Title is the line before the RFI line
+                if i > 0:
+                    title = lines[i - 1]
+                break
+
+        # Extract structured fields from the block
+        for line in lines:
+            ll = line.lower()
+            if ll.startswith("category:"):
+                category = line[len("category:"):].strip()
+            elif ll.startswith("service locations:"):
+                location = line[len("service locations:"):].strip()
+            elif ll.startswith("max budget:"):
+                budget = line[len("max budget:"):].strip()
+            elif ll.startswith("respond by:"):
+                respond_by = line[len("respond by:"):].strip()
+
+        if not title:
             continue
 
-        # Skip the Ariba "X results for ..." summary line
-        if re.search(r'^\d+\s+results?\s+for\b', text, re.IGNORECASE):
-            continue
-
-        matched_term = next((t for t in terms if t.lower() in text.lower()), "")
-        if not matched_term:
-            continue
-
-        # Skip container elements — if a direct child also matches, this is a wrapper
-        child_texts = [
-            c.get_text(" ", strip=True)
-            for c in el.find_all(["div", "li", "article", "section"], recursive=False)
-        ]
-        if any(
-            len(ct) > 20 and any(t.lower() in ct.lower() for t in terms)
-            for ct in child_texts
-        ):
-            continue
-
-        ids = id_pattern.findall(text)
-        rfi_id = ids[0] if ids else "N/A"
-
-        key = rfi_id if rfi_id != "N/A" else text[30:130]
-        if key in seen:
-            continue
-        seen.add(key)
-
-        results.append({
+        cards.append({
             "RFI ID": rfi_id,
-            "Lead Title": text[:200],
-            "Matched Term": matched_term
+            "Lead Title": title,
+            "Category": category,
+            "Location": location,
+            "Max Budget": budget,
+            "Respond By": respond_by,
         })
 
-    print(f"  Found {len(results)} matching cards via BeautifulSoup fallback")
+    return cards
 
-    if not results:
-        print("  === PAGE STRUCTURE SAMPLE (first 20 non-trivial elements) ===")
-        count = 0
-        for el in soup.find_all(["div", "li", "tr", "span"]):
-            t = el.get_text(" ", strip=True)
-            if len(t) > 80:
-                print("  |", t[:120])
-                count += 1
-                if count >= 20:
-                    break
+def search_ariba(driver, keyword_string):
+    """
+    Search Ariba with the full keyword string (as typed manually).
+    Then paginate through all pages of results.
+    """
+    from urllib.parse import quote
+    encoded = quote(keyword_string)
+    url = (
+        f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/"
+        f"comsapsbncdiscoveryui#/leads/search?commodityName={encoded}"
+    )
 
-    return results
+    print(f"\n🔍 Searching Ariba...")
+    driver.get(url)
 
-def search_ariba(driver, terms, batch_size=5):
-    all_results = []
-    seen_keys = set()
-    total_batches = (len(terms) + batch_size - 1) // batch_size
-
-    for i in range(0, len(terms), batch_size):
-        batch = terms[i:i+batch_size]
-        batch_num = i // batch_size + 1
-        query = "%20".join(batch)
-        url = (
-            f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/"
-            f"comsapsbncdiscoveryui#/leads/search?commodityName={query}"
+    # Wait for results to load
+    try:
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR,
+                "[class*='sapMListItem'], [class*='sapMLIB']"
+            ))
         )
+        print("  ✅ Results detected on page")
+    except Exception:
+        print("  ⚠️ Timed out waiting for results — proceeding anyway")
 
-        print(f"\n🔍 Batch {batch_num}/{total_batches}: {batch}")
-        driver.get(url)
+    all_cards = []
+    seen_ids = set()
+    page_num = 1
 
-        # Wait for any recognisable card/list element to appear
-        try:
-            WebDriverWait(driver, 30).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR,
-                    "[class*='leadCard'], [class*='LeadCard'], [class*='lead-card'], "
-                    "[class*='sbn-lead'], [class*='fd-card'], [class*='sapMListItem'], "
-                    "[class*='sapMLIB'], [class*='opportunity'], [class*='tileContent']"
-                ))
-            )
-            print("  ✅ Card elements detected on page")
-        except Exception:
-            print("  ⚠️ Timed out waiting for card elements — proceeding anyway")
+    while True:
+        print(f"\n  📄 Scraping page {page_num}...")
 
         scroll_to_load(driver)
+        time.sleep(2)
 
         html = driver.page_source
         print(f"  PAGE SIZE: {len(html)}")
 
-        # Try Selenium extraction first; fall back to BeautifulSoup
-        batch_results = extract_cards_selenium(driver, terms)
-        if batch_results is None:
-            batch_results = parse_cards_bs4(html, terms)
+        # Save debug snapshot
+        try:
+            with open(f"ariba_debug_p{page_num}.html", "w", encoding="utf-8") as f:
+                f.write(html)
+        except Exception:
+            pass
 
-        # Deduplicate across batches
-        for r in batch_results:
-            key = r["RFI ID"] if r["RFI ID"] != "N/A" else r["Lead Title"][30:130]
-            if key not in seen_keys:
-                seen_keys.add(key)
-                all_results.append(r)
+        cards = parse_ariba_cards(html)
+        print(f"  Parsed {len(cards)} cards on page {page_num}")
 
-    # Save debug snapshot of last page
-    try:
-        with open("ariba_debug.html", "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
-        print("\n📄 Debug snapshot saved to ariba_debug.html")
-    except Exception as e:
-        print(f"Could not save debug snapshot: {e}")
+        new_cards = 0
+        for card in cards:
+            if card["RFI ID"] not in seen_ids:
+                seen_ids.add(card["RFI ID"])
+                all_cards.append(card)
+                new_cards += 1
 
-    print(f"\n✅ Total unique results across all batches: {len(all_results)}")
-    return all_results
+        print(f"  {new_cards} new unique cards (total so far: {len(all_cards)})")
 
-def run_ariba(terms):
+        if new_cards == 0:
+            print("  No new cards — stopping pagination")
+            break
+
+        # Try to click the "Next" pagination button
+        try:
+            next_btn = driver.find_element(By.CSS_SELECTOR,
+                "[class*='sapMPaginatorNext'], "
+                "[class*='nextPage'], "
+                "button[aria-label*='Next'], "
+                "button[title*='Next'], "
+                "a[aria-label*='Next']"
+            )
+            if next_btn.is_enabled() and next_btn.is_displayed():
+                driver.execute_script("arguments[0].click();", next_btn)
+                time.sleep(5)
+                page_num += 1
+            else:
+                print("  Next button disabled — last page reached")
+                break
+        except Exception:
+            print("  No Next button found — single page or end of results")
+            break
+
+    print(f"\n✅ Total unique cards scraped: {len(all_cards)}")
+    return all_cards
+
+def run_ariba(keyword_string):
     driver = build_driver()
     try:
         driver.get("about:blank")
-        print("✅ Driver OK, title:", driver.title)
+        print("✅ Driver OK")
 
         login(driver)
 
         current_url = driver.current_url
-        page_title = driver.title
         print(f"Post-login URL: {current_url}")
-        print(f"Post-login title: {page_title}")
+        print(f"Post-login title: {driver.title}")
 
         if "login" in current_url.lower() or "authenticat" in current_url.lower():
             print("❌ Login may have failed — still on auth page")
             return []
 
-        return search_ariba(driver, terms)
+        return search_ariba(driver, keyword_string)
 
     except Exception as e:
         print(f"❌ Ariba error: {e}")
@@ -450,11 +429,12 @@ def run_ariba(terms):
 
 # ---------------- AI FILTER ---------------- #
 
-def ai_filter(leads, index, threshold=0.55):
+def ai_filter(leads, index, threshold=0.45):
     out = []
 
     for l in leads:
         title = l.get("Lead Title", "")
+        category = l.get("Category", "")
 
         if not index:
             l["AI_Matched_Keyword"] = "fallback"
@@ -465,7 +445,7 @@ def ai_filter(leads, index, threshold=0.55):
             continue
 
         l, score = enrich_lead_ai(l, index)
-        print(f"  SCORE: {score} {title[:60]}")
+        print(f"  SCORE: {score} | {title[:60]} | {category[:40]}")
 
         if score >= threshold:
             out.append(l)
@@ -483,17 +463,19 @@ def main():
         data = extract_events(html, url)
         write(get_ws(ss, name), data)
 
-    # Use only keywords for Ariba search
+    # Load keywords
     keywords = get_keywords(ss)
 
     if not keywords:
         print("❌ No keywords found — check your KEYWORDS sheet has a 'Keywords' column with data")
         return
 
-    terms = keywords
-    print(f"TERMS (keywords only): {len(terms)}")
+    # Join all keywords into one search string — exactly as you'd type in the search bar
+    keyword_string = " ".join(keywords)
+    print(f"\nSearch string ({len(keywords)} keywords): {keyword_string[:120]}...")
 
-    raw = run_ariba(terms)
+    # Run Ariba search and scrape all result cards
+    raw = run_ariba(keyword_string)
 
     print(f"\nRAW RESULTS: {len(raw)}")
 
@@ -501,7 +483,8 @@ def main():
         print("❌ Ariba returned empty results")
         return
 
-    index = build_keyword_index(terms)
+    # Build semantic index and filter
+    index = build_keyword_index(keywords)
     print(f"KEYWORD INDEX SIZE: {len(index)}")
 
     final = ai_filter(raw, index)
