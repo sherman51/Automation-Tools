@@ -166,12 +166,15 @@ def write(ws, data):
 
 def get_keywords(ss):
     """
-    FIX 1: Load keywords from the KEYWORDS sheet and split them properly.
+    Load keywords from the KEYWORDS sheet and split them properly.
 
-    Handles all common separators (comma, semicolon, newline, space) so that
-    even if all keywords are pasted into a single cell, they are returned as
-    individual tokens — giving the semantic index multiple focused vectors
-    instead of one diluted mega-vector.
+    Handles all common separators (comma, semicolon, newline) so that
+    even if all keywords are pasted into a single cell, they are returned
+    as individual tokens — giving the semantic index multiple focused
+    vectors instead of one diluted mega-vector.
+
+    Any entry longer than 6 words is split further on spaces so a
+    100-word blob doesn't become a single useless vector.
     """
     try:
         ws = ss.worksheet("KEYWORDS")
@@ -182,18 +185,13 @@ def get_keywords(ss):
         ]
         kws = []
         for entry in raw:
-            # Split on comma, semicolon, or newline first
             parts = re.split(r'[,;\n]+', entry)
             for p in parts:
                 p = p.strip().lower()
                 if p:
-                    # If a part still looks like a long phrase, split on spaces too
-                    # so "cold chain storage" → ["cold chain storage"] (kept as phrase)
-                    # but a 100-word blob → individual meaningful phrases
                     if len(p.split()) > 6:
-                        # Split long blobs into individual words/short phrases
-                        sub_parts = p.split()
-                        kws.extend(sub_parts)
+                        # Long blob — split into individual words
+                        kws.extend(p.split())
                     else:
                         kws.append(p)
 
@@ -215,7 +213,6 @@ def get_keywords(ss):
 
 def build_driver():
     options = Options()
-
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -261,16 +258,14 @@ def parse_ariba_cards(html):
     """
     Parse Ariba lead cards from the page HTML.
 
-    FIX 4: Added minimum title length guard (len >= 10) to prevent
-    truncated page fragments like "spital" from being treated as lead titles.
+    Minimum title length of 10 chars prevents page fragments like
+    "spital" (a truncated "hospital") from being treated as lead titles.
     """
     soup = BeautifulSoup(html, "html.parser")
     full_text = soup.get_text("\n", strip=True)
 
     cards = []
-
     rfi_pattern = re.compile(r'(RFI\s*[·•]\s*(\d{7,12}))', re.IGNORECASE)
-
     matches = list(rfi_pattern.finditer(full_text))
 
     print(f"  Found {len(matches)} RFI markers in page text")
@@ -307,8 +302,7 @@ def parse_ariba_cards(html):
             elif ll.startswith("respond by:"):
                 respond_by = line[len("respond by:"):].strip()
 
-        # FIX 4: Skip cards with no title or suspiciously short titles
-        # (e.g. "spital" is a fragment of "hospital" from a page split)
+        # Skip cards with no title or suspiciously short titles
         if not title or len(title) < 10:
             print(f"  ⚠️  Skipping card with invalid title: '{title}' (RFI {rfi_id})")
             continue
@@ -324,10 +318,85 @@ def parse_ariba_cards(html):
 
     return cards
 
+# ---------------- PAGINATION HELPERS ---------------- #
+
+def get_first_rfi_id(driver):
+    """
+    Read the RFI ID of the very first card currently visible on the page.
+    Used as a stable fingerprint to detect when the page has actually
+    changed after clicking Next.
+    Returns None if no card is found.
+    """
+    try:
+        html = driver.page_source
+        rfi_pattern = re.compile(r'RFI\s*[·•]\s*(\d{7,12})', re.IGNORECASE)
+        match = rfi_pattern.search(html)
+        return match.group(1) if match else None
+    except Exception:
+        return None
+
+
+def wait_for_page_change(driver, old_first_id, timeout=30):
+    """
+    Poll every second until the first RFI ID on the page differs from
+    old_first_id, or until timeout seconds have elapsed.
+
+    More reliable than time.sleep() for SAP UI5 / React SPAs where the
+    DOM updates asynchronously after a Next-page click.
+
+    Returns True if the page changed, False if it timed out.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        new_first = get_first_rfi_id(driver)
+        if new_first and new_first != old_first_id:
+            print(f"  ✅ Page changed (first RFI: {old_first_id} → {new_first})")
+            return True
+        time.sleep(1)
+    print(f"  ⚠️  Page did not change within {timeout}s (still showing RFI {old_first_id})")
+    return False
+
+
+def click_next(driver):
+    """
+    Try all known Next-button selectors for Ariba's SAP UI5 interface.
+    Scrolls the button into view before clicking to handle off-screen cases.
+    Returns True if a clickable Next button was found and clicked.
+    """
+    selectors = [
+        "[class*='sapMPaginatorNext']",
+        "[class*='nextPage']",
+        "button[aria-label*='Next Page']",
+        "button[aria-label*='Next']",
+        "button[title*='Next']",
+        "a[aria-label*='Next']",
+        "[id*='nextPage']",
+    ]
+    for sel in selectors:
+        try:
+            btns = driver.find_elements(By.CSS_SELECTOR, sel)
+            for btn in btns:
+                if btn.is_displayed() and btn.is_enabled():
+                    driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+                    time.sleep(0.3)
+                    driver.execute_script("arguments[0].click();", btn)
+                    print(f"  ➡️  Clicked Next via selector: {sel}")
+                    return True
+        except Exception:
+            continue
+    return False
+
+# ---------------- ARIBA SEARCH ---------------- #
+
 def search_ariba(driver, keyword_string):
     """
-    Search Ariba with the full keyword string (as typed manually).
-    Then paginate through all pages of results.
+    Search Ariba and paginate through ALL result pages.
+
+    Stop conditions are based on whether navigation actually succeeded —
+    NOT on whether new cards were found (those are separate concerns).
+    After clicking Next, we wait for the first RFI ID on the page to change
+    rather than sleeping a fixed amount, making it reliable even on slow
+    connections.
     """
     from urllib.parse import quote
     encoded = quote(keyword_string)
@@ -339,6 +408,7 @@ def search_ariba(driver, keyword_string):
     print(f"\n🔍 Searching Ariba...")
     driver.get(url)
 
+    # Wait for the first batch of results to appear
     try:
         WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.CSS_SELECTOR,
@@ -357,11 +427,12 @@ def search_ariba(driver, keyword_string):
         print(f"\n  📄 Scraping page {page_num}...")
 
         scroll_to_load(driver)
-        time.sleep(2)
+        time.sleep(1)
 
         html = driver.page_source
         print(f"  PAGE SIZE: {len(html)}")
 
+        # Save debug snapshot
         try:
             with open(f"ariba_debug_p{page_num}.html", "w", encoding="utf-8") as f:
                 f.write(html)
@@ -378,33 +449,30 @@ def search_ariba(driver, keyword_string):
                 all_cards.append(card)
                 new_cards += 1
 
-        print(f"  {new_cards} new unique cards (total so far: {len(all_cards)})")
+        print(f"  {new_cards} new unique cards added (total so far: {len(all_cards)})")
 
-        if new_cards == 0:
-            print("  No new cards — stopping pagination")
+        # Capture the first RFI on this page as a navigation fingerprint
+        first_rfi_this_page = get_first_rfi_id(driver)
+
+        # Try to navigate to the next page
+        clicked = click_next(driver)
+
+        if not clicked:
+            print("  ⏹  No Next button found — reached the last page")
             break
 
-        try:
-            next_btn = driver.find_element(By.CSS_SELECTOR,
-                "[class*='sapMPaginatorNext'], "
-                "[class*='nextPage'], "
-                "button[aria-label*='Next'], "
-                "button[title*='Next'], "
-                "a[aria-label*='Next']"
-            )
-            if next_btn.is_enabled() and next_btn.is_displayed():
-                driver.execute_script("arguments[0].click();", next_btn)
-                time.sleep(5)
-                page_num += 1
-            else:
-                print("  Next button disabled — last page reached")
-                break
-        except Exception:
-            print("  No Next button found — single page or end of results")
+        # Wait for the DOM to actually reflect the new page
+        changed = wait_for_page_change(driver, first_rfi_this_page, timeout=30)
+
+        if not changed:
+            print("  ⏹  Page did not change after clicking Next — stopping")
             break
+
+        page_num += 1
 
     print(f"\n✅ Total unique cards scraped: {len(all_cards)}")
     return all_cards
+
 
 def run_ariba(keyword_string):
     driver = build_driver()
@@ -438,7 +506,7 @@ def run_ariba(keyword_string):
 
 def ai_filter(leads, index, threshold=0.35):
     """
-    FIX 2: Lowered threshold from 0.45 → 0.35.
+    Threshold lowered from 0.45 → 0.35.
 
     With many focused keyword vectors in the index, scores are distributed
     more granularly. 0.45 was too aggressive and cut genuinely relevant leads
@@ -485,17 +553,16 @@ def main():
         print("❌ No keywords found — check your KEYWORDS sheet has a 'Keywords' column with data")
         return
 
-    # FIX 3: Deduplicate raw leads by RFI ID before scoring,
-    # so duplicate cards from pagination don't inflate the results
-    # or waste embedding compute.
-    keyword_string = " ".join(keywords[:20])  # Use first 20 for the search URL (avoid URL length limits)
+    # Use first 20 keywords for the search URL to avoid URL length limits
+    keyword_string = " ".join(keywords[:20])
     print(f"\nSearch string ({len(keywords)} keywords): {keyword_string[:120]}...")
 
+    # Run Ariba search across all pages
     raw = run_ariba(keyword_string)
 
     print(f"\nRAW RESULTS (before dedup): {len(raw)}")
 
-    # FIX 3: Deduplicate by RFI ID
+    # Deduplicate by RFI ID before scoring
     seen = set()
     deduped = []
     for r in raw:
@@ -504,7 +571,7 @@ def main():
             seen.add(rid)
             deduped.append(r)
         elif not rid:
-            deduped.append(r)  # Keep leads without an ID (won't be skipped silently)
+            deduped.append(r)
 
     print(f"AFTER DEDUP: {len(deduped)}")
 
