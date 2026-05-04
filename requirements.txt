@@ -9,3 +9,4 @@ google-auth-httplib2
 selenium
 webdriver-manager
 numpy
+openai
