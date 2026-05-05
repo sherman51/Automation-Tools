@@ -60,7 +60,8 @@ def score_lead(lead, keyword_index, keywords):
         are not accidentally dropped.
 
     Final score = weighted sum capped at 1.0.
-    Recommended threshold: 0.55
+    Recommended threshold: 0.5
+
     """
     title    = lead.get("Lead Title", "").lower()
     category = lead.get("Category", "").lower()
@@ -975,7 +976,7 @@ def ai_filter(leads, index, keywords, threshold=0.5):
     """
     Multi-signal relevance filter.
 
-    Threshold raised from 0.35 → 0.55 to match the new scorer which
+    Threshold raised from 0.35 → 0.5 to match the new scorer which
     combines three signals:
       - Exact keyword hit count   (weight 0.50) — must hit multiple keywords
       - Top-3 semantic similarity (weight 0.40) — must be broadly relevant
