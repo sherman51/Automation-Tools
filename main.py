@@ -882,7 +882,7 @@ def type_into_search_box(driver, keyword_string):
         inp.clear()
         # Use first keyword only — Ariba search is OR-based per word
         # but relevance drops with too many terms; use the most specific one
-        search_term = keyword_string.split()[0] if keyword_string else "pharmaceutical"
+        search_term = keyword_string if keyword_string else "pharmaceutical"
         inp.send_keys(search_term)
         time.sleep(0.5)
         inp.send_keys(Keys.RETURN)
