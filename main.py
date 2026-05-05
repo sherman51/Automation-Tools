@@ -971,7 +971,7 @@ def run_ariba(keyword_string):
 
 # ---------------- AI FILTER ---------------- #
 
-def ai_filter(leads, index, keywords, threshold=0.55):
+def ai_filter(leads, index, keywords, threshold=0.5):
     """
     Multi-signal relevance filter.
 
