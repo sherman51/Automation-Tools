@@ -561,8 +561,14 @@ def parse_ariba_cards(driver):
 
         for i, line in enumerate(lines):
             if rfi_pattern.search(line):
-                if i > 0:
-                    title = lines[i - 1]
+                title_parts = []
+                
+                # Look backwards up to 3 lines before RFI
+                for j in range(max(0, i - 3), i):
+                    if len(lines[j]) > 5:
+                        title_parts.append(lines[j])
+                
+                title = " ".join(title_parts)
                 break
 
         for line in lines:
