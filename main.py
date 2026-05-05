@@ -26,45 +26,105 @@ from sentence_transformers import SentenceTransformer
 
 MODEL = SentenceTransformer("all-MiniLM-L6-v2")
 
+
 def embed(text):
     return MODEL.encode(text)
+
 
 def cosine_similarity(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
+
 def build_keyword_index(keywords):
     return {kw: embed(kw) for kw in keywords}
 
-def semantic_match(text, keyword_index):
-    if not keyword_index:
-        return None, 0.0
-    text_vec = embed(text)
-    best_kw = None
-    best_score = 0
-    for kw, vec in keyword_index.items():
-        score = cosine_similarity(text_vec, vec)
-        if score > best_score:
-            best_score = score
-            best_kw = kw
-    return best_kw, round(best_score, 3)
 
-def enrich_lead_ai(lead, keyword_index):
-    text = f"{lead.get('Lead Title','')} {lead.get('Category','')}".strip()
-    if not text:
-        text = "unknown"
-    kw, score = semantic_match(text, keyword_index)
-    lead["Matched_Keyword"] = kw
-    lead["Match_Score"] = score
-    t = text.lower()
-    if any(x in t for x in ["drug", "pharma", "vaccine", "clinical", "medical", "hospital"]):
-        lead["Match_Category"] = "Pharma/Medical"
-    elif any(x in t for x in ["logistics", "supply chain", "warehouse", "distribution", "cold chain"]):
-        lead["Match_Category"] = "Logistics"
-    elif any(x in t for x in ["it", "software", "cloud", "system", "digital"]):
-        lead["Match_Category"] = "IT"
+def score_lead(lead, keyword_index, keywords):
+    """
+    Multi-signal relevance scorer.
+
+    Signal 1 — Exact/partial keyword match (weight 0.50)
+        Counts how many keywords appear as substrings in the lead text.
+        Normalised against 15% of total keywords so a lead must hit
+        multiple keywords to score well here.
+        Example: 25 keywords → need ~4 hits to max this signal.
+
+    Signal 2 — Top-3 semantic similarity average (weight 0.40)
+        Averages the three highest cosine similarities instead of just
+        the best. A lead must be semantically close to MULTIPLE keywords
+        to score well — a single accidental high match gets diluted.
+
+    Signal 3 — Category field boost (weight 0.10)
+        If the Ariba category label contains a high-value term, add a
+        small additive boost so clearly relevant leads with sparse titles
+        are not accidentally dropped.
+
+    Final score = weighted sum capped at 1.0.
+    Recommended threshold: 0.55
+    """
+    title    = lead.get("Lead Title", "").lower()
+    category = lead.get("Category", "").lower()
+    text     = f"{title} {category}"
+
+    if not text.strip():
+        return 0.0, [], "none"
+
+    # ── Signal 1: Exact keyword hit count ──────────────────────────────
+    hits = []
+    for kw in keywords:
+        if kw.lower() in text:
+            hits.append(kw)
+
+    # Normalise: hitting 15%+ of all keywords maxes out this signal
+    exact_score = min(len(hits) / max(len(keywords) * 0.15, 1), 1.0)
+
+    # ── Signal 2: Top-3 semantic similarity average ────────────────────
+    if keyword_index:
+        text_vec = embed(text)
+        sims = sorted(
+            [cosine_similarity(text_vec, vec) for vec in keyword_index.values()],
+            reverse=True
+        )
+        top_n = sims[:3]
+        semantic_score = sum(top_n) / len(top_n)
     else:
-        lead["Match_Category"] = "General"
+        semantic_score = 0.0
+
+    # ── Signal 3: Category field boost ────────────────────────────────
+    boost_terms = [
+        "pharma", "drug", "medicine", "vaccine", "clinical",
+        "logistics", "supply chain", "cold chain", "distribution",
+        "warehouse", "hospital", "medical"
+    ]
+    category_boost = 0.10 if any(t in category for t in boost_terms) else 0.0
+
+    # ── Weighted final score ───────────────────────────────────────────
+    final = (exact_score * 0.50) + (semantic_score * 0.40) + category_boost
+    final = round(min(final, 1.0), 3)
+
+    match_cat = _classify(hits, title, category)
+    return final, hits, match_cat
+
+
+def _classify(hits, title, category):
+    text = f"{title} {category}"
+    if any(x in text for x in ["drug", "pharma", "vaccine", "clinical", "medical", "hospital"]):
+        return "Pharma/Medical"
+    elif any(x in text for x in ["logistics", "supply chain", "warehouse", "distribution", "cold chain"]):
+        return "Logistics"
+    elif any(x in text for x in ["it", "software", "cloud", "system", "digital"]):
+        return "IT"
+    return "General"
+
+
+def enrich_lead_ai(lead, keyword_index, keywords):
+    score, hits, match_cat = score_lead(lead, keyword_index, keywords)
+    lead["Match_Score"]       = score
+    lead["Matched_Keywords"]  = ", ".join(hits) if hits else ""
+    lead["Keyword_Hit_Count"] = len(hits)
+    lead["Match_Category"]    = match_cat
     return lead, score
+
 
 # ---------------- CONFIG ---------------- #
 
@@ -96,6 +156,7 @@ def fetch(url):
     except:
         return ""
 
+
 def extract_events(html, url):
     soup = BeautifulSoup(html, "html.parser")
     results = []
@@ -126,6 +187,7 @@ def extract_events(html, url):
                 results.append(row)
     return results
 
+
 # ---------------- GOOGLE SHEETS ---------------- #
 
 def get_creds():
@@ -137,8 +199,10 @@ def get_creds():
         ]
     )
 
+
 def connect():
     return gspread.authorize(get_creds()).open_by_key(SPREADSHEET_ID)
+
 
 def get_ws(ss, name):
     try:
@@ -146,12 +210,14 @@ def get_ws(ss, name):
     except:
         return ss.add_worksheet(title=name, rows="1000", cols="20")
 
+
 def write(ws, data):
     ws.clear()
     if not data:
         return
     headers = list(data[0].keys())
     ws.update([headers] + [[r.get(h, "") for h in headers] for r in data])
+
 
 # ---------------- KEYWORDS ---------------- #
 
@@ -185,6 +251,7 @@ def get_keywords(ss):
         print(f"⚠️ Could not load KEYWORDS sheet: {e}")
         return []
 
+
 # ---------------- SELENIUM DRIVER ---------------- #
 
 def build_driver():
@@ -194,6 +261,8 @@ def build_driver():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     # 1280x900 keeps the pagination bar inside the headless click region.
+    # At wider viewports the Next button renders off-screen and clicks
+    # are silently ignored by headless Chrome.
     options.add_argument("--window-size=1280,900")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-infobars")
@@ -205,6 +274,7 @@ def build_driver():
     driver.set_page_load_timeout(60)
     return driver
 
+
 def login(driver):
     driver.get("https://service.ariba.com/Authenticator.aw")
     WebDriverWait(driver, 20).until(
@@ -214,6 +284,7 @@ def login(driver):
         ARIBA_PASSWORD + Keys.RETURN
     )
     time.sleep(8)
+
 
 # ---------------- UI5 DIAGNOSTICS ---------------- #
 
@@ -231,13 +302,14 @@ def check_ui5_available(driver):
     print(f"  🔧 UI5 check: {result}")
     return "unavailable" not in result
 
+
 # ---------------- PAGE SIZE ---------------- #
 
 def set_page_size(driver):
     """
-    FIX: Only try 50 and 25 — Ariba Discovery max is 50 items/page, not 100.
     Open the UI5 sapMSlt items-per-page dropdown and select the largest
-    available option (50 -> 25).
+    available option. Ariba Discovery max is 50 — do NOT try 100 as it
+    does not exist and clicking it may select the wrong element.
     """
     try:
         controls = driver.find_elements(By.CSS_SELECTOR, "[class*='sapMSlt']")
@@ -249,7 +321,6 @@ def set_page_size(driver):
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", ctrl)
         time.sleep(0.5)
 
-        # Open via UI5 API if possible, else plain DOM click
         driver.execute_script("""
             try {
                 var c = sap.ui.getCore().byId(arguments[0].id);
@@ -257,9 +328,9 @@ def set_page_size(driver):
             } catch(e) {}
             arguments[0].click();
         """, ctrl)
-        time.sleep(1.5)  # wait for UI5 popup animation
+        time.sleep(1.5)
 
-        # FIX: Removed "100" — Ariba max page size is 50
+        # FIX: Removed "100" — confirmed Ariba Discovery max is 50
         for val in ["50", "25"]:
             opts = driver.find_elements(By.XPATH,
                 f"//*[@role='option' and contains(normalize-space(.), '{val}')]"
@@ -274,20 +345,20 @@ def set_page_size(driver):
                 time.sleep(2)
                 return
 
-        # Popup open but option not found — close cleanly
         driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
         print("  ⚠️  Page size option not found — using default")
 
     except Exception as e:
         print(f"  ⚠️  set_page_size error: {e}")
 
+
 # ---------------- SEARCH BOX ---------------- #
 
 def type_into_search(driver, keyword_string):
     """
-    Type the full keyword string into Ariba's search box exactly as a
-    human would. Ariba OR-matches every word so pasting the full string
-    returns every lead containing any keyword.
+    Type the full keyword string into Ariba's search box.
+    Ariba OR-matches every word so using all keywords maximises recall —
+    any lead containing any keyword will appear in results.
     """
     search_selectors = [
         "input[placeholder*='Search']",
@@ -336,6 +407,7 @@ def type_into_search(driver, keyword_string):
         print(f"  ⚠️  Search box interaction failed: {e}")
         return False
 
+
 # ---------------- PAGE STATE HELPERS ---------------- #
 
 def get_all_rfi_ids(driver):
@@ -346,6 +418,7 @@ def get_all_rfi_ids(driver):
         return frozenset(pattern.findall(text))
     except Exception:
         return frozenset()
+
 
 def get_page_numbers(driver):
     """
@@ -362,6 +435,7 @@ def get_page_numbers(driver):
         pass
     return None, None
 
+
 def get_content_fingerprint(driver):
     """Short fingerprint of current page content for change detection."""
     try:
@@ -370,6 +444,7 @@ def get_content_fingerprint(driver):
         return text[m.start(): m.start() + 400] if m else text[:400]
     except Exception:
         return ""
+
 
 def is_next_disabled(driver):
     """Return True if the Next Page button exists and is aria-disabled."""
@@ -383,12 +458,13 @@ def is_next_disabled(driver):
     except Exception:
         return False
 
+
 # ---------------- DEBUG BUTTONS ---------------- #
 
 def debug_buttons(driver):
     """
-    Print all visible buttons on the page to help diagnose pagination issues.
-    Call this when Next click strategies are failing.
+    Print all visible buttons on the page to diagnose pagination failures.
+    Called automatically when all Next click strategies are exhausted.
     """
     try:
         info = driver.execute_script("""
@@ -407,6 +483,7 @@ def debug_buttons(driver):
     except Exception as e:
         print(f"  🔬 DEBUG buttons error: {e}")
 
+
 # ---------------- CLICK NEXT ---------------- #
 
 def click_next(driver):
@@ -414,11 +491,17 @@ def click_next(driver):
     Click the Next Page button using UI5-native firePress() first,
     then fall back through DOM strategies.
 
+    Why firePress() and not ActionChains:
+    ActionChains computes coordinates from getBoundingClientRect(). At wide
+    viewports the button renders off-screen and the click is silently
+    ignored even though Selenium reports success. firePress() goes through
+    UI5's own event bus with no coordinates needed.
+
     FIX: Extended button ID scan range from 60 → 500 to handle deep
-    pagination (IDs increment by ~9 per page; page 42 needs ~__button420).
-    FIX: Strategy 3 now attempts UI5 firePress() on the DOM element's ID
-    before falling back to a plain .click(), which often fails in UI5 apps.
-    FIX: Added debug_buttons() call when all strategies are exhausted.
+    pagination (IDs increment ~9 per page; page 42 needs ~__button420).
+    FIX: Strategy 3 now attempts UI5 firePress() via the element's own ID
+    before falling back to plain .click(), which UI5 often ignores.
+    FIX: debug_buttons() called when all strategies exhausted.
     """
 
     # ── Strategy 1: scan all registered UI5 controls for Next button ──
@@ -455,8 +538,8 @@ def click_next(driver):
         return True
 
     # ── Strategy 2: firePress by scanning Ariba button ID range ──
-    # FIX: Extended upper bound from 60 → 500 to handle 40+ pages
-    # (IDs increment ~9 per page: page 42 needs ~__button420)
+    # FIX: Extended upper bound 60 → 500
+    # Pattern: IDs increment ~9 per page → page 42 needs ~__button420
     result = driver.execute_script("""
         try {
             var core = sap.ui.getCore();
@@ -486,8 +569,7 @@ def click_next(driver):
         return True
 
     # ── Strategy 3: last button inside the pagination wrapper ──
-    # FIX: Try UI5 firePress() on the DOM element's own ID first
-    # before falling back to .click(), which UI5 often ignores
+    # FIX: Try UI5 firePress() via element ID before plain DOM .click()
     result = driver.execute_script("""
         try {
             var wrapper = document.querySelector(
@@ -571,23 +653,23 @@ def click_next(driver):
     except Exception as e:
         print(f"  ⚠️  [S5] ActionChains failed: {e}")
 
-    # FIX: Dump all buttons to logs so we can diagnose future failures
+    # All strategies exhausted — dump buttons for diagnosis
     print("  ❌ All Next click strategies exhausted")
     debug_buttons(driver)
     return False
+
 
 # ---------------- WAIT FOR PAGE CHANGE ---------------- #
 
 def wait_for_next_page(driver, old_ids, old_fingerprint, timeout=60):
     """
     Poll until the page content changes after clicking Next.
-    FIX: Default timeout increased from 30s → 60s. Ariba's XHR can be
-    slow on large paginated result sets.
+    FIX: Default timeout increased 30s → 60s for slow Ariba XHR responses.
 
-    Two independent signals:
+    Two independent change signals:
       A) RFI ID frozenset differs from the previous page
       B) Content fingerprint (first 400 chars around first card) differs
-    Also exits early if Next button becomes disabled (just loaded last page).
+    Also exits early if Next becomes disabled (just loaded last page).
     """
     time.sleep(2)  # let UI5 start its XHR / re-render cycle
 
@@ -610,7 +692,6 @@ def wait_for_next_page(driver, old_ids, old_fingerprint, timeout=60):
                 print(f"  ✅ Page changed (content fingerprint) after {poll}s")
                 return True
 
-            # Next became disabled — last page content is now loaded
             if is_next_disabled(driver):
                 print("  ⏹  Next button disabled — scraping final page")
                 return True
@@ -624,13 +705,13 @@ def wait_for_next_page(driver, old_ids, old_fingerprint, timeout=60):
     print(f"  ⚠️  No change after {timeout}s — stopping")
     return False
 
+
 # ---------------- CARD PARSING ---------------- #
 
 def is_singapore(location_str):
     """
     Return True if location is Singapore or blank.
-    Blank is kept because many SG tenders don't populate the location field.
-    The URL filter already handles server-side narrowing.
+    Blank kept because many SG tenders don't populate the location field.
     """
     if not location_str:
         return True
@@ -638,6 +719,18 @@ def is_singapore(location_str):
 
 
 def parse_ariba_cards(driver):
+    """
+    Parse all lead cards from the current page's rendered innerText.
+
+    FIX: Block start boundary changed from fixed -300 chars to
+    matches[idx-1].end() so each card's text window is cleanly isolated
+    from the previous card. Prevents previous card's footer lines
+    (category, budget, deadline) from bleeding into this card's title.
+
+    FIX: Title selection now walks backwards from the RFI line skipping
+    any line that starts with a known field prefix, so field labels from
+    a prior card can never be mistaken for the title.
+    """
     try:
         full_text = driver.execute_script("return document.body.innerText || '';")
     except Exception:
@@ -654,18 +747,22 @@ def parse_ariba_cards(driver):
 
     skipped_location = 0
 
+    # Field prefixes to skip when walking backwards for the title
+    field_prefixes = (
+        "category:", "service locations:", "max budget:",
+        "respond by:", "contract length:", "decision deadline:",
+        "rfi", "rfp", "rfq"
+    )
+
     for idx, match in enumerate(matches):
         rfi_id = match.group(2).strip()
 
-        # FIX: Start the block at the PREVIOUS card's RFI match end (or
-        # a small 50-char lookback) — NOT 300 chars back.
-        # This prevents the previous card's footer lines from being
-        # mistaken for this card's title.
+        # FIX: Start block right after the previous RFI marker ends,
+        # not 300 chars before the current one
         if idx > 0:
-            prev_end = matches[idx - 1].end()
-            start = prev_end  # start right after previous RFI marker
+            start = matches[idx - 1].end()
         else:
-            start = max(0, match.start() - 400)  # first card: look back for title
+            start = max(0, match.start() - 400)
 
         end = (matches[idx + 1].start()
                if idx + 1 < len(matches)
@@ -677,25 +774,15 @@ def parse_ariba_cards(driver):
         title = category = location = budget = ""
         respond_by = contract_length = decision_deadline = ""
 
-        # FIX: Title must come from lines BEFORE the RFI marker,
-        # but only within this card's own block (not bled from previous card).
-        # Also skip lines that look like field labels from a prior card.
-        field_prefixes = (
-            "category:", "service locations:", "max budget:",
-            "respond by:", "contract length:", "decision deadline:",
-            "rfi", "rfp", "rfq"
-        )
+        # FIX: Walk backwards from the RFI line, skip field label lines
         for i, line in enumerate(lines):
             if rfi_pattern.search(line):
-                # Walk backwards from RFI line to find the real title —
-                # skip any lines that are clearly field values/labels
                 for j in range(i - 1, -1, -1):
                     candidate = lines[j].strip()
                     if not candidate:
                         continue
                     if candidate.lower().startswith(field_prefixes):
                         continue
-                    # Must be at least 10 chars and not purely numeric
                     if len(candidate) >= 10 and not candidate.replace(" ", "").isdigit():
                         title = candidate
                         break
@@ -742,26 +829,18 @@ def parse_ariba_cards(driver):
 
     return cards
 
+
 # ---------------- ARIBA MAIN FLOW ---------------- #
 
 def search_ariba(driver, keyword_string):
     """
     Full Ariba Discovery scrape:
-
-      1. Navigate with ?serviceLocations=Singapore
-         Ariba filters server-side — only SG leads are returned.
-
-      2. Type the full keyword string into the search box.
-         Ariba OR-matches every word, maximising recall.
-
-      3. Set page size to 50 (confirmed Ariba maximum).
-
-      4. Paginate using UI5 firePress() with extended button ID range (→500).
-
-      5. parse_ariba_cards() applies a client-side Singapore check.
+      1. Navigate with ?serviceLocations=Singapore (server-side filter)
+      2. Type keyword string into search box (OR-match maximises recall)
+      3. Set page size to 50 (confirmed Ariba Discovery maximum)
+      4. Paginate via UI5 firePress() with extended ID range (→500)
+      5. parse_ariba_cards() isolates card blocks and extracts clean titles
     """
-
-    # Step 1 — load with Singapore server-side filter
     base_url = (
         "https://portal.us.bn.cloud.ariba.com/dashboard/appext/"
         f"comsapsbncdiscoveryui#/leads/search"
@@ -787,7 +866,6 @@ def search_ariba(driver, keyword_string):
     ids_sg_only = get_all_rfi_ids(driver)
     print(f"  📊 RFIs with SG filter only: {len(ids_sg_only)}")
 
-    # Step 2 — type keywords into search box on top of SG filter
     print(f"\n  🔎 Submitting keyword search...")
     searched = type_into_search(driver, keyword_string)
     if not searched:
@@ -796,7 +874,6 @@ def search_ariba(driver, keyword_string):
     ids_after_search = get_all_rfi_ids(driver)
     print(f"  📊 RFIs after keyword search: {len(ids_after_search)}")
 
-    # Step 3 — increase page size (max 50 on Ariba Discovery)
     print("\n  ⚙️  Setting page size...")
     set_page_size(driver)
     time.sleep(2)
@@ -804,7 +881,6 @@ def search_ariba(driver, keyword_string):
     ids_after_resize = get_all_rfi_ids(driver)
     print(f"  📊 RFIs after page size change: {len(ids_after_resize)}")
 
-    # Steps 4 & 5 — paginate and collect
     all_cards = []
     seen_ids  = set()
     page_num  = 1
@@ -834,7 +910,6 @@ def search_ariba(driver, keyword_string):
 
         print(f"  Total unique cards so far: {len(all_cards)}")
 
-        # Page counter check
         cur, total = get_page_numbers(driver)
         if cur and total:
             print(f"  📊 Page {cur} of {total}")
@@ -842,22 +917,18 @@ def search_ariba(driver, keyword_string):
                 print("  ⏹  Last page reached (page counter)")
                 break
 
-        # Next button state check
         if is_next_disabled(driver):
             print("  ⏹  Next button disabled — last page")
             break
 
-        # Snapshot state before clicking Next
         ids_before = get_all_rfi_ids(driver)
         fp_before  = get_content_fingerprint(driver)
 
-        # Click Next
         clicked = click_next(driver)
         if not clicked:
             print("  ⏹  Could not click Next — stopping")
             break
 
-        # Wait for new content — FIX: timeout now 60s (was 30s)
         changed = wait_for_next_page(driver, ids_before, fp_before, timeout=60)
         if not changed:
             print("  ⏹  Page did not change — stopping")
@@ -897,34 +968,49 @@ def run_ariba(keyword_string):
         except Exception:
             pass
 
+
 # ---------------- AI FILTER ---------------- #
 
-def ai_filter(leads, index, threshold=0.35):
+def ai_filter(leads, index, keywords, threshold=0.55):
     """
-    Semantic similarity filter.
-    Each lead's title + category is embedded and compared against every
-    keyword embedding. Leads scoring >= threshold are kept.
+    Multi-signal relevance filter.
+
+    Threshold raised from 0.35 → 0.55 to match the new scorer which
+    combines three signals:
+      - Exact keyword hit count   (weight 0.50) — must hit multiple keywords
+      - Top-3 semantic similarity (weight 0.40) — must be broadly relevant
+      - Category field boost      (weight 0.10) — rewards pharma/logistics labels
+
+    Prints per-lead detail for easy auditing. Matched_Keywords and
+    Keyword_Hit_Count are written to the sheet so you can review why
+    each lead was kept and tune the threshold if needed.
     """
     out = []
     for lead in leads:
-        title    = lead.get("Lead Title", "")
-        category = lead.get("Category", "")
-
         if not index:
-            lead["Matched_Keyword"] = "fallback"
-            lead["Match_Score"]     = 1.0
-            lead["Match_Category"]  = "General"
+            lead["Matched_Keywords"]   = "fallback"
+            lead["Match_Score"]        = 1.0
+            lead["Keyword_Hit_Count"]  = 0
+            lead["Match_Category"]     = "General"
             out.append(lead)
-            print(f"  ✅ No index — keeping: {title[:60]}")
             continue
 
-        lead, score = enrich_lead_ai(lead, index)
-        print(f"  SCORE {score:.3f} | {title[:60]} | {category[:40]}")
+        lead, score = enrich_lead_ai(lead, index, keywords)
+        status = "✅ KEEP" if score >= threshold else "❌ DROP"
+        print(
+            f"  {status} {score:.3f} | hits={lead['Keyword_Hit_Count']:2d} "
+            f"| {lead.get('Lead Title','')[:55]} "
+            f"| [{lead.get('Matched_Keywords','')[:60]}]"
+        )
 
         if score >= threshold:
             out.append(lead)
 
+    kept    = len(out)
+    dropped = len(leads) - kept
+    print(f"\n  📊 Filter result: {kept} kept, {dropped} dropped (threshold={threshold})")
     return out
+
 
 # ---------------- MAIN ---------------- #
 
@@ -944,7 +1030,7 @@ def main():
         print("❌ No keywords — check KEYWORDS sheet has a 'Keywords' column with data")
         return
 
-    # Join ALL keywords into one string.
+    # Join ALL keywords into one string for Ariba search box.
     # Ariba OR-matches every word so using all keywords maximises recall.
     keyword_string = " ".join(keywords)
     print(f"\n🔑 Search string ({len(keywords)} keywords): {keyword_string[:120]}...")
@@ -953,7 +1039,7 @@ def main():
     index = build_keyword_index(keywords)
     print(f"✅ Keyword index built: {len(index)} entries")
 
-    # Scrape Ariba with Singapore filter + keyword search
+    # Scrape Ariba
     raw = run_ariba(keyword_string)
     print(f"\nRAW RESULTS: {len(raw)}")
 
@@ -973,8 +1059,8 @@ def main():
             deduped.append(r)
     print(f"AFTER DEDUP: {len(deduped)}")
 
-    # AI relevance filter
-    final = ai_filter(deduped, index)
+    # AI relevance filter — pass full keywords list for exact-match signal
+    final = ai_filter(deduped, index, keywords)
     print(f"FINAL (after AI filter): {len(final)}")
 
     # Write to Google Sheet
