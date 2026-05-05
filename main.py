@@ -146,7 +146,6 @@ ARIBA_USERNAME = os.getenv("ARIBA_USERNAME", "")
 ARIBA_PASSWORD = os.getenv("ARIBA_PASSWORD", "")
 
 ALLOWED_LOCATIONS = ["singapore", "sg"]
-ARIBA_BASE_LINK = "https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/RfxEvent/preview/"
 
 # ---------------- ALPS SCRAPER ---------------- #
 
@@ -824,7 +823,6 @@ def parse_ariba_cards(driver):
             "Respond By":        respond_by,
             "Contract Length":   contract_length,
             "Decision Deadline": decision_deadline,
-            "Link":              f'=HYPERLINK("{link}", "View")',
         })
 
     if skipped_location:
