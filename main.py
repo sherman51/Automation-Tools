@@ -823,6 +823,7 @@ def parse_ariba_cards(driver):
             "Respond By":        respond_by,
             "Contract Length":   contract_length,
             "Decision Deadline": decision_deadline,
+            "Link":              f"https://portal.us.bn.cloud.ariba.com/dashboard/appext/comsapsbncdiscoveryui#/RfxEvent/preview/{rfi_id}",
         })
 
     if skipped_location:
