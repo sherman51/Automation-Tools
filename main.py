@@ -194,8 +194,6 @@ def build_driver():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     # 1280x900 keeps the pagination bar inside the headless click region.
-    # At 1920px wide the Next button renders at left:1291 which is outside
-    # headless Chrome's effective input area — clicks are silently ignored.
     options.add_argument("--window-size=1280,900")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-infobars")
@@ -237,12 +235,9 @@ def check_ui5_available(driver):
 
 def set_page_size(driver):
     """
+    FIX: Only try 50 and 25 — Ariba Discovery max is 50 items/page, not 100.
     Open the UI5 sapMSlt items-per-page dropdown and select the largest
-    available option (100 -> 50 -> 25).
-    The option list renders as a page-level popup so we:
-      1. Click the control to open it
-      2. Wait for the popup animation
-      3. Click the target option element
+    available option (50 -> 25).
     """
     try:
         controls = driver.find_elements(By.CSS_SELECTOR, "[class*='sapMSlt']")
@@ -264,7 +259,8 @@ def set_page_size(driver):
         """, ctrl)
         time.sleep(1.5)  # wait for UI5 popup animation
 
-        for val in ["100", "50", "25"]:
+        # FIX: Removed "100" — Ariba max page size is 50
+        for val in ["50", "25"]:
             opts = driver.find_elements(By.XPATH,
                 f"//*[@role='option' and contains(normalize-space(.), '{val}')]"
             )
@@ -291,8 +287,7 @@ def type_into_search(driver, keyword_string):
     """
     Type the full keyword string into Ariba's search box exactly as a
     human would. Ariba OR-matches every word so pasting the full string
-    returns every lead containing any keyword — producing many pages of
-    results instead of the default unfiltered 10.
+    returns every lead containing any keyword.
     """
     search_selectors = [
         "input[placeholder*='Search']",
@@ -388,6 +383,30 @@ def is_next_disabled(driver):
     except Exception:
         return False
 
+# ---------------- DEBUG BUTTONS ---------------- #
+
+def debug_buttons(driver):
+    """
+    Print all visible buttons on the page to help diagnose pagination issues.
+    Call this when Next click strategies are failing.
+    """
+    try:
+        info = driver.execute_script("""
+            var btns = document.querySelectorAll('button');
+            var out = [];
+            btns.forEach(function(b) {
+                var label = (b.getAttribute('aria-label') || b.textContent || '').trim();
+                if (label) {
+                    out.push(b.id + ' | ' + label.substring(0,50)
+                             + ' | disabled:' + b.getAttribute('aria-disabled'));
+                }
+            });
+            return out.join('\\n');
+        """)
+        print(f"  🔬 DEBUG — buttons on page:\n{info[:2000]}")
+    except Exception as e:
+        print(f"  🔬 DEBUG buttons error: {e}")
+
 # ---------------- CLICK NEXT ---------------- #
 
 def click_next(driver):
@@ -395,12 +414,11 @@ def click_next(driver):
     Click the Next Page button using UI5-native firePress() first,
     then fall back through DOM strategies.
 
-    Why firePress() and not ActionChains:
-    ActionChains computes coordinates from getBoundingClientRect(). At wide
-    viewports the button renders at left > 1280, outside headless Chrome's
-    effective input area, and the click is silently ignored even though
-    Selenium reports success. firePress() goes through UI5's own event bus
-    with no coordinates needed.
+    FIX: Extended button ID scan range from 60 → 500 to handle deep
+    pagination (IDs increment by ~9 per page; page 42 needs ~__button420).
+    FIX: Strategy 3 now attempts UI5 firePress() on the DOM element's ID
+    before falling back to a plain .click(), which often fails in UI5 apps.
+    FIX: Added debug_buttons() call when all strategies are exhausted.
     """
 
     # ── Strategy 1: scan all registered UI5 controls for Next button ──
@@ -436,11 +454,13 @@ def click_next(driver):
         print(f"  ➡️  [S1] UI5 firePress — {result}")
         return True
 
-    # ── Strategy 2: firePress by scanning common Ariba button ID range ──
+    # ── Strategy 2: firePress by scanning Ariba button ID range ──
+    # FIX: Extended upper bound from 60 → 500 to handle 40+ pages
+    # (IDs increment ~9 per page: page 42 needs ~__button420)
     result = driver.execute_script("""
         try {
             var core = sap.ui.getCore();
-            for (var n = 25; n <= 60; n++) {
+            for (var n = 25; n <= 500; n++) {
                 var ctrl = core.byId('__button' + n);
                 if (!ctrl) continue;
                 var dom = ctrl.getDomRef ? ctrl.getDomRef() : null;
@@ -450,7 +470,7 @@ def click_next(driver):
                     if (dom.getAttribute('aria-disabled') === 'true') return 'disabled';
                     if (typeof ctrl.firePress === 'function') {
                         ctrl.firePress();
-                        return 'firePress-id:__button' + n;
+                        return 'firePress-id:__button' + n + '|label:' + label;
                     }
                 }
             }
@@ -466,6 +486,8 @@ def click_next(driver):
         return True
 
     # ── Strategy 3: last button inside the pagination wrapper ──
+    # FIX: Try UI5 firePress() on the DOM element's own ID first
+    # before falling back to .click(), which UI5 often ignores
     result = driver.execute_script("""
         try {
             var wrapper = document.querySelector(
@@ -476,6 +498,16 @@ def click_next(driver):
                 var last = btns[btns.length - 1];
                 if (last && last.getAttribute('aria-disabled') === 'true') return 'disabled';
                 if (last && !last.disabled) {
+                    var domId = last.id;
+                    if (domId) {
+                        try {
+                            var ctrl = sap.ui.getCore().byId(domId);
+                            if (ctrl && typeof ctrl.firePress === 'function') {
+                                ctrl.firePress();
+                                return 'ui5-firePress-from-wrapper:' + domId;
+                            }
+                        } catch(e) {}
+                    }
                     last.click();
                     return 'dom-last-in-wrapper';
                 }
@@ -488,7 +520,7 @@ def click_next(driver):
         print("  ⏹  [S3] Next button disabled — last page")
         return False
     if result:
-        print(f"  ➡️  [S3] DOM last-button-in-wrapper")
+        print(f"  ➡️  [S3] DOM last-button-in-wrapper — {result}")
         return True
 
     # ── Strategy 4: dispatchEvent directly on the button element ──
@@ -539,14 +571,19 @@ def click_next(driver):
     except Exception as e:
         print(f"  ⚠️  [S5] ActionChains failed: {e}")
 
+    # FIX: Dump all buttons to logs so we can diagnose future failures
     print("  ❌ All Next click strategies exhausted")
+    debug_buttons(driver)
     return False
 
 # ---------------- WAIT FOR PAGE CHANGE ---------------- #
 
-def wait_for_next_page(driver, old_ids, old_fingerprint, timeout=30):
+def wait_for_next_page(driver, old_ids, old_fingerprint, timeout=60):
     """
     Poll until the page content changes after clicking Next.
+    FIX: Default timeout increased from 30s → 60s. Ariba's XHR can be
+    slow on large paginated result sets.
+
     Two independent signals:
       A) RFI ID frozenset differs from the previous page
       B) Content fingerprint (first 400 chars around first card) differs
@@ -691,20 +728,16 @@ def search_ariba(driver, keyword_string):
     Full Ariba Discovery scrape:
 
       1. Navigate with ?serviceLocations=Singapore
-         Ariba filters server-side — only SG leads are returned so we
-         paginate through far fewer pages than the global unfiltered feed.
+         Ariba filters server-side — only SG leads are returned.
 
       2. Type the full keyword string into the search box.
-         Ariba OR-matches every word, so using all keywords returns every
-         lead containing any of them — exactly what you see manually.
+         Ariba OR-matches every word, maximising recall.
 
-      3. Set page size to 100/50 to minimise pagination round-trips.
+      3. Set page size to 50 (confirmed Ariba maximum).
 
-      4. Paginate using UI5 firePress() to avoid coordinate-based click
-         failures when the Next button renders off-screen.
+      4. Paginate using UI5 firePress() with extended button ID range (→500).
 
-      5. parse_ariba_cards() applies a client-side Singapore check as a
-         safety net.
+      5. parse_ariba_cards() applies a client-side Singapore check.
     """
 
     # Step 1 — load with Singapore server-side filter
@@ -742,7 +775,7 @@ def search_ariba(driver, keyword_string):
     ids_after_search = get_all_rfi_ids(driver)
     print(f"  📊 RFIs after keyword search: {len(ids_after_search)}")
 
-    # Step 3 — increase page size
+    # Step 3 — increase page size (max 50 on Ariba Discovery)
     print("\n  ⚙️  Setting page size...")
     set_page_size(driver)
     time.sleep(2)
@@ -803,8 +836,8 @@ def search_ariba(driver, keyword_string):
             print("  ⏹  Could not click Next — stopping")
             break
 
-        # Wait for new content
-        changed = wait_for_next_page(driver, ids_before, fp_before, timeout=30)
+        # Wait for new content — FIX: timeout now 60s (was 30s)
+        changed = wait_for_next_page(driver, ids_before, fp_before, timeout=60)
         if not changed:
             print("  ⏹  Page did not change — stopping")
             break
@@ -850,8 +883,6 @@ def ai_filter(leads, index, threshold=0.35):
     Semantic similarity filter.
     Each lead's title + category is embedded and compared against every
     keyword embedding. Leads scoring >= threshold are kept.
-    Threshold 0.35 catches logistics/supply chain leads (~0.39) while
-    filtering clearly unrelated ones.
     """
     out = []
     for lead in leads:
@@ -861,7 +892,7 @@ def ai_filter(leads, index, threshold=0.35):
         if not index:
             lead["Matched_Keyword"] = "fallback"
             lead["Match_Score"]     = 1.0
-            lead["Match_Category"]        = "General"
+            lead["Match_Category"]  = "General"
             out.append(lead)
             print(f"  ✅ No index — keeping: {title[:60]}")
             continue
@@ -893,8 +924,7 @@ def main():
         return
 
     # Join ALL keywords into one string.
-    # Ariba OR-matches every word so using all keywords maximises recall —
-    # any lead containing any keyword will appear in results.
+    # Ariba OR-matches every word so using all keywords maximises recall.
     keyword_string = " ".join(keywords)
     print(f"\n🔑 Search string ({len(keywords)} keywords): {keyword_string[:120]}...")
 
