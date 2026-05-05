@@ -6,6 +6,7 @@ import os
 import re
 import time
 import numpy as np
+from urllib.parse import quote
 
 from google.oauth2.service_account import Credentials
 
@@ -48,7 +49,7 @@ def semantic_match(text, keyword_index):
     return best_kw, round(best_score, 3)
 
 def enrich_lead_ai(lead, keyword_index):
-    text = f"{lead.get('Lead Title','')} {lead.get('Category','')} {lead.get('Matched Term','')}".strip()
+    text = f"{lead.get('Lead Title','')} {lead.get('Category','')}".strip()
     if not text:
         text = "unknown"
     kw, score = semantic_match(text, keyword_index)
@@ -85,7 +86,7 @@ ARIBA_PASSWORD = os.getenv("ARIBA_PASSWORD", "")
 
 ALLOWED_LOCATIONS = ["singapore", "sg"]
 
-# ---------------- SCRAPER (ALPS) ---------------- #
+# ---------------- ALPS SCRAPER ---------------- #
 
 def fetch(url):
     try:
@@ -99,7 +100,7 @@ def extract_events(html, url):
     soup = BeautifulSoup(html, "html.parser")
     results = []
     current_month = None
-    for tag in soup.find_all(["h1","h2","h3","h4","table"]):
+    for tag in soup.find_all(["h1", "h2", "h3", "h4", "table"]):
         if tag.name.startswith("h"):
             text = tag.get_text(strip=True)
             if any(m in text.lower() for m in [
@@ -111,7 +112,7 @@ def extract_events(html, url):
             rows = tag.find_all("tr")
             headers = [h.get_text(strip=True) for h in tag.find_all("th")]
             if not headers and rows:
-                headers = [c.get_text(strip=True) for c in rows[0].find_all(["td","th"])]
+                headers = [c.get_text(strip=True) for c in rows[0].find_all(["td", "th"])]
                 rows = rows[1:]
             for tr in rows:
                 cols = [td.get_text(strip=True) for td in tr.find_all("td")]
@@ -125,13 +126,15 @@ def extract_events(html, url):
                 results.append(row)
     return results
 
-# ---------------- SHEETS ---------------- #
+# ---------------- GOOGLE SHEETS ---------------- #
 
 def get_creds():
     return Credentials.from_service_account_info(
         json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON")),
-        scopes=["https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive"]
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
     )
 
 def connect():
@@ -182,7 +185,7 @@ def get_keywords(ss):
         print(f"⚠️ Could not load KEYWORDS sheet: {e}")
         return []
 
-# ---------------- DRIVER ---------------- #
+# ---------------- SELENIUM DRIVER ---------------- #
 
 def build_driver():
     options = Options()
@@ -190,7 +193,9 @@ def build_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    # Use a standard 1280x900 window — keeps pagination bar inside clickable area
+    # 1280x900 keeps the pagination bar inside the headless click region.
+    # At 1920px wide the Next button renders at left:1291 which is outside
+    # headless Chrome's effective input area — clicks are silently ignored.
     options.add_argument("--window-size=1280,900")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-infobars")
@@ -212,56 +217,53 @@ def login(driver):
     )
     time.sleep(8)
 
-# ---------------- UI5 HELPERS ---------------- #
+# ---------------- UI5 DIAGNOSTICS ---------------- #
 
 def check_ui5_available(driver):
-    """Confirm sap.ui is loaded and log how many controls are registered."""
+    """Log whether sap.ui is loaded and how many controls are registered."""
     result = driver.execute_script("""
         try {
             var v = sap.ui.version;
             var els = sap.ui.getCore().mElements || sap.ui.getCore()._mElements || {};
-            return 'UI5 v' + v + ', ' + Object.keys(els).length + ' controls';
+            return 'UI5 v' + v + ', ' + Object.keys(els).length + ' controls registered';
         } catch(e) {
             return 'unavailable: ' + e.message;
         }
     """)
-    print(f"  🔧 UI5: {result}")
+    print(f"  🔧 UI5 check: {result}")
     return "unavailable" not in result
 
+# ---------------- PAGE SIZE ---------------- #
 
 def set_page_size(driver):
     """
-    Open the UI5 sapMSlt items-per-page dropdown and select the largest option.
-    UI5 renders the option list as a page-level popup — we click the control,
-    wait for the popup, then click the biggest option we can find.
+    Open the UI5 sapMSlt items-per-page dropdown and select the largest
+    available option (100 -> 50 -> 25).
+    The option list renders as a page-level popup so we:
+      1. Click the control to open it
+      2. Wait for the popup animation
+      3. Click the target option element
     """
     try:
-        # Find the custom select control
         controls = driver.find_elements(By.CSS_SELECTOR, "[class*='sapMSlt']")
         if not controls:
-            print("  ⚠️  No sapMSlt found — skipping page size change")
+            print("  ⚠️  No page-size control found — using default")
             return
 
         ctrl = controls[0]
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", ctrl)
         time.sleep(0.5)
 
-        # Open the popup via UI5 API if possible, else DOM click
-        opened = driver.execute_script("""
+        # Open via UI5 API if possible, else plain DOM click
+        driver.execute_script("""
             try {
                 var c = sap.ui.getCore().byId(arguments[0].id);
-                if (c && typeof c.open === 'function') { c.open(); return 'api'; }
-                if (c && typeof c.fireChange === 'function') {
-                    arguments[0].click(); return 'dom-click';
-                }
+                if (c && typeof c.open === 'function') { c.open(); return; }
             } catch(e) {}
             arguments[0].click();
-            return 'dom-click';
         """, ctrl)
-        print(f"  📋 Opened page-size dropdown via: {opened}")
         time.sleep(1.5)  # wait for UI5 popup animation
 
-        # The popup list renders at document root — find all visible option items
         for val in ["100", "50", "25"]:
             opts = driver.find_elements(By.XPATH,
                 f"//*[@role='option' and contains(normalize-space(.), '{val}')]"
@@ -272,19 +274,74 @@ def set_page_size(driver):
                 )
             if opts:
                 driver.execute_script("arguments[0].click();", opts[0])
-                print(f"  ✅ Set page size to {val}")
+                print(f"  ✅ Page size set to {val}")
                 time.sleep(2)
                 return
 
-        # Could not find option — close popup and continue
+        # Popup open but option not found — close cleanly
         driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-        print("  ⚠️  Could not find size option — using default")
+        print("  ⚠️  Page size option not found — using default")
 
     except Exception as e:
         print(f"  ⚠️  set_page_size error: {e}")
 
+# ---------------- SEARCH BOX ---------------- #
 
-# ---------------- PAGINATION ---------------- #
+def type_into_search(driver, keyword_string):
+    """
+    Type the full keyword string into Ariba's search box exactly as a
+    human would. Ariba OR-matches every word so pasting the full string
+    returns every lead containing any keyword — producing many pages of
+    results instead of the default unfiltered 10.
+    """
+    search_selectors = [
+        "input[placeholder*='Search']",
+        "input[placeholder*='search']",
+        "input[aria-label*='Search']",
+        "input[aria-label*='search']",
+        "[class*='sapMSFI']",
+        "[class*='sapMInputBaseInner']",
+        "input[type='search']",
+        "input[id*='search']",
+        "input[id*='Search']",
+    ]
+
+    inp = None
+    for sel in search_selectors:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in els:
+                if el.is_displayed() and el.is_enabled():
+                    inp = el
+                    print(f"  🔎 Found search box via: {sel}")
+                    break
+        except Exception:
+            continue
+        if inp:
+            break
+
+    if not inp:
+        print("  ⚠️  Search box not found — continuing with Singapore filter only")
+        return False
+
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inp)
+        time.sleep(0.3)
+        ActionChains(driver).move_to_element(inp).click().perform()
+        time.sleep(0.3)
+        inp.clear()
+        inp.send_keys(keyword_string)
+        print(f"  🔎 Typed: '{keyword_string[:100]}{'...' if len(keyword_string) > 100 else ''}'")
+        time.sleep(0.5)
+        inp.send_keys(Keys.RETURN)
+        print("  🔎 Search submitted — waiting for results...")
+        time.sleep(4)
+        return True
+    except Exception as e:
+        print(f"  ⚠️  Search box interaction failed: {e}")
+        return False
+
+# ---------------- PAGE STATE HELPERS ---------------- #
 
 def get_all_rfi_ids(driver):
     """Return frozenset of all RFI IDs currently rendered on the page."""
@@ -295,11 +352,10 @@ def get_all_rfi_ids(driver):
     except Exception:
         return frozenset()
 
-
 def get_page_numbers(driver):
     """
-    Try to extract (current_page, total_pages) from the UI5 pagination control.
-    Ariba renders this as plain text like '1 of 12' or '1/12'.
+    Extract (current_page, total_pages) from UI5 pagination text.
+    Ariba renders this as '1 of 12' or '1/12'.
     Returns (None, None) if not found.
     """
     try:
@@ -311,9 +367,8 @@ def get_page_numbers(driver):
         pass
     return None, None
 
-
 def get_content_fingerprint(driver):
-    """Short fingerprint of visible content for change detection."""
+    """Short fingerprint of current page content for change detection."""
     try:
         text = driver.execute_script("return document.body.innerText || '';")
         m = re.search(r'RFI\s*[\u00b7\u2022\-|]\s*\d{7,12}', text, re.IGNORECASE)
@@ -321,52 +376,48 @@ def get_content_fingerprint(driver):
     except Exception:
         return ""
 
-
-def is_next_button_disabled(driver):
-    """Return True if the Next Page button exists but is aria-disabled."""
+def is_next_disabled(driver):
+    """Return True if the Next Page button exists and is aria-disabled."""
     try:
         btns = driver.find_elements(By.CSS_SELECTOR,
             "button[aria-label*='Next Page'], button[aria-label*='Next']")
         for btn in btns:
-            aria = btn.get_attribute("aria-disabled")
-            if aria in ("true", "True", True):
+            if btn.get_attribute("aria-disabled") in ("true", "True"):
                 return True
         return False
     except Exception:
         return False
 
+# ---------------- CLICK NEXT ---------------- #
 
 def click_next(driver):
     """
-    Click the Next Page button using UI5-native firePress first,
-    then fall back to DOM-level strategies.
+    Click the Next Page button using UI5-native firePress() first,
+    then fall back through DOM strategies.
 
-    Root cause of the "click registers but page never changes" issue:
-    ActionChains computes click coordinates from getBoundingClientRect().
-    When the button is at left:1291 in a 1920px window, those coordinates
-    land outside the headless Chrome input region. We fix this by:
-      1. Using UI5's own firePress() — no coordinates needed
-      2. Falling back to JS .click() directly on the element
-      3. Finally trying ActionChains on a smaller viewport
+    Why firePress() and not ActionChains:
+    ActionChains computes coordinates from getBoundingClientRect(). At wide
+    viewports the button renders at left > 1280, outside headless Chrome's
+    effective input area, and the click is silently ignored even though
+    Selenium reports success. firePress() goes through UI5's own event bus
+    with no coordinates needed.
     """
 
-    # ── Strategy 1: UI5 firePress via sap.ui.getCore() control scan ──
+    # ── Strategy 1: scan all registered UI5 controls for Next button ──
     result = driver.execute_script("""
         try {
             var core = sap.ui.getCore();
             var els = core.mElements || core._mElements || {};
-
-            // Walk all registered UI5 controls looking for Next button
             for (var id in els) {
                 var el = els[id];
                 if (!el) continue;
                 try {
                     var dom = el.getDomRef ? el.getDomRef() : null;
-                    if (!dom) continue;
+                    if (!dom || dom.tagName !== 'BUTTON') continue;
                     var label = dom.getAttribute('aria-label') || '';
-                    var title = dom.getAttribute('title') || '';
-                    if ((label.indexOf('Next') !== -1 || title.indexOf('Next') !== -1)
-                            && dom.tagName === 'BUTTON') {
+                    var title  = dom.getAttribute('title') || '';
+                    if (label.indexOf('Next') !== -1 || title.indexOf('Next') !== -1) {
+                        if (dom.getAttribute('aria-disabled') === 'true') return 'disabled';
                         if (typeof el.firePress === 'function') {
                             el.firePress();
                             return 'firePress:' + id;
@@ -378,48 +429,53 @@ def click_next(driver):
         return null;
     """)
 
+    if result == 'disabled':
+        print("  ⏹  [S1] Next button disabled — last page")
+        return False
     if result:
         print(f"  ➡️  [S1] UI5 firePress — {result}")
         return True
 
-    # ── Strategy 2: firePress by known button ID patterns ──
+    # ── Strategy 2: firePress by scanning common Ariba button ID range ──
     result = driver.execute_script("""
         try {
             var core = sap.ui.getCore();
-            // Try button IDs Ariba typically uses for pagination
-            var candidates = ['__button37','__button38','__button39','__button36'];
-            for (var i = 0; i < candidates.length; i++) {
-                var ctrl = core.byId(candidates[i]);
+            for (var n = 25; n <= 60; n++) {
+                var ctrl = core.byId('__button' + n);
                 if (!ctrl) continue;
                 var dom = ctrl.getDomRef ? ctrl.getDomRef() : null;
                 if (!dom) continue;
                 var label = dom.getAttribute('aria-label') || '';
-                if (label.indexOf('Next') !== -1 && typeof ctrl.firePress === 'function') {
-                    ctrl.firePress();
-                    return 'firePress-id:' + candidates[i];
+                if (label.indexOf('Next') !== -1) {
+                    if (dom.getAttribute('aria-disabled') === 'true') return 'disabled';
+                    if (typeof ctrl.firePress === 'function') {
+                        ctrl.firePress();
+                        return 'firePress-id:__button' + n;
+                    }
                 }
             }
         } catch(e) {}
         return null;
     """)
 
+    if result == 'disabled':
+        print("  ⏹  [S2] Next button disabled — last page")
+        return False
     if result:
         print(f"  ➡️  [S2] UI5 firePress by ID — {result}")
         return True
 
-    # ── Strategy 3: Click the last button inside the pagination wrapper ──
+    # ── Strategy 3: last button inside the pagination wrapper ──
     result = driver.execute_script("""
         try {
-            // Ariba wraps pagination in .discovery-pagination-wrapper
             var wrapper = document.querySelector(
                 '.discovery-pagination-wrapper, [class*="pagination"]'
             );
             if (wrapper) {
                 var btns = wrapper.querySelectorAll('button');
-                // Last button is always Next
                 var last = btns[btns.length - 1];
-                if (last && !last.disabled
-                        && last.getAttribute('aria-disabled') !== 'true') {
+                if (last && last.getAttribute('aria-disabled') === 'true') return 'disabled';
+                if (last && !last.disabled) {
                     last.click();
                     return 'dom-last-in-wrapper';
                 }
@@ -428,12 +484,15 @@ def click_next(driver):
         return null;
     """)
 
+    if result == 'disabled':
+        print("  ⏹  [S3] Next button disabled — last page")
+        return False
     if result:
-        print(f"  ➡️  [S3] DOM last-button-in-wrapper — {result}")
+        print(f"  ➡️  [S3] DOM last-button-in-wrapper")
         return True
 
-    # ── Strategy 4: JS dispatchEvent on the button element directly ──
-    dispatched = driver.execute_script("""
+    # ── Strategy 4: dispatchEvent directly on the button element ──
+    result = driver.execute_script("""
         try {
             var btns = document.querySelectorAll(
                 "button[aria-label*='Next Page'], button[aria-label*='Next']"
@@ -452,19 +511,18 @@ def click_next(driver):
         return null;
     """)
 
-    if dispatched:
-        print(f"  ➡️  [S4] dispatchEvent — {dispatched}")
+    if result:
+        print(f"  ➡️  [S4] dispatchEvent — {result}")
         return True
 
-    # ── Strategy 5: ActionChains after scrolling button into center ──
+    # ── Strategy 5: ActionChains after scrollIntoView ──
     try:
         btn = None
         for sel in ["button[aria-label*='Next Page']", "button[aria-label*='Next']"]:
             els = driver.find_elements(By.CSS_SELECTOR, sel)
             for el in els:
                 if el.is_displayed() and el.is_enabled():
-                    aria = el.get_attribute("aria-disabled")
-                    if aria not in ("true", "True"):
+                    if el.get_attribute("aria-disabled") not in ("true", "True"):
                         btn = el
                         break
             if btn:
@@ -481,18 +539,20 @@ def click_next(driver):
     except Exception as e:
         print(f"  ⚠️  [S5] ActionChains failed: {e}")
 
-    print("  ❌ All Next click strategies exhausted — on last page")
+    print("  ❌ All Next click strategies exhausted")
     return False
 
+# ---------------- WAIT FOR PAGE CHANGE ---------------- #
 
 def wait_for_next_page(driver, old_ids, old_fingerprint, timeout=30):
     """
-    Wait until the page content actually changes after clicking Next.
-    Polls two signals: RFI ID set and content fingerprint.
-    Returns True if change detected, False if timeout or last page.
+    Poll until the page content changes after clicking Next.
+    Two independent signals:
+      A) RFI ID frozenset differs from the previous page
+      B) Content fingerprint (first 400 chars around first card) differs
+    Also exits early if Next button becomes disabled (just loaded last page).
     """
-    # Brief pause to let UI5 start its XHR / re-render cycle
-    time.sleep(2)
+    time.sleep(2)  # let UI5 start its XHR / re-render cycle
 
     deadline = time.time() + timeout
     poll = 0
@@ -503,9 +563,8 @@ def wait_for_next_page(driver, old_ids, old_fingerprint, timeout=30):
 
         try:
             new_ids = get_all_rfi_ids(driver)
-            new_fp = get_content_fingerprint(driver)
+            new_fp  = get_content_fingerprint(driver)
 
-            # Content changed — new page is ready
             if new_ids and new_ids != old_ids:
                 print(f"  ✅ Page changed (RFI set) after {poll}s")
                 return True
@@ -514,33 +573,38 @@ def wait_for_next_page(driver, old_ids, old_fingerprint, timeout=30):
                 print(f"  ✅ Page changed (content fingerprint) after {poll}s")
                 return True
 
-            # Next button became disabled — we just loaded the last page's content
-            if is_next_button_disabled(driver):
-                print("  ⏹  Next button disabled — last page content loaded")
-                return True  # return True so we still scrape this page's cards
+            # Next became disabled — last page content is now loaded
+            if is_next_disabled(driver):
+                print("  ⏹  Next button disabled — scraping final page")
+                return True
 
             if poll % 5 == 0:
-                print(f"    [poll {poll}s] waiting... RFIs on page: {len(new_ids)}")
+                print(f"    [poll {poll}s] waiting... RFIs visible: {len(new_ids)}")
 
         except Exception as e:
             print(f"    [poll {poll}s] error: {e}")
 
-    print(f"  ⚠️  No change after {timeout}s — stopping pagination")
+    print(f"  ⚠️  No change after {timeout}s — stopping")
     return False
-
 
 # ---------------- CARD PARSING ---------------- #
 
 def is_singapore(location_str):
+    """
+    Return True if location is Singapore or blank.
+    Blank is kept because many SG tenders don't populate the location field.
+    The URL filter already handles server-side narrowing.
+    """
     if not location_str:
-        return True  # blank location = keep (many SG tenders leave this empty)
+        return True
     return any(term in location_str.lower() for term in ALLOWED_LOCATIONS)
 
 
 def parse_ariba_cards(driver):
     """
-    Parse all lead cards from the current page's rendered text.
-    Filters to Singapore leads only.
+    Parse all lead cards from the current page's rendered innerText.
+    Each card is anchored by its 'RFI · <id>' marker. We extract the block
+    of text around each marker and pull out structured fields from it.
     """
     try:
         full_text = driver.execute_script("return document.body.innerText || '';")
@@ -554,7 +618,7 @@ def parse_ariba_cards(driver):
         re.IGNORECASE
     )
     matches = list(rfi_pattern.finditer(full_text))
-    print(f"  Found {len(matches)} RFI markers")
+    print(f"  Found {len(matches)} RFI markers on page")
 
     skipped_location = 0
 
@@ -562,21 +626,23 @@ def parse_ariba_cards(driver):
         rfi_id = match.group(2).strip()
 
         start = max(0, match.start() - 300)
-        end = (matches[idx + 1].start()
-               if idx + 1 < len(matches)
-               else match.end() + 500)
+        end   = (matches[idx + 1].start()
+                 if idx + 1 < len(matches)
+                 else match.end() + 500)
         block = full_text[start:end].strip()
         lines = [l.strip() for l in block.split("\n") if l.strip()]
 
         title = category = location = budget = ""
         respond_by = contract_length = decision_deadline = ""
 
+        # Title is the line immediately before the RFI marker line
         for i, line in enumerate(lines):
             if rfi_pattern.search(line):
                 if i > 0:
                     title = lines[i - 1]
                 break
 
+        # Structured fields follow the RFI line
         for line in lines:
             ll = line.lower()
             if ll.startswith("category:"):
@@ -596,19 +662,20 @@ def parse_ariba_cards(driver):
             print(f"  ⚠️  Skipping invalid title: '{title}' (RFI {rfi_id})")
             continue
 
+        # Client-side safety net on top of the URL server-side filter
         if not is_singapore(location):
-            print(f"  🌍 Skipping non-SG: '{title[:50]}' (location: {location})")
+            print(f"  🌍 Skipping non-SG: '{title[:50]}' (location: '{location}')")
             skipped_location += 1
             continue
 
         cards.append({
-            "RFI ID": rfi_id,
-            "Lead Title": title,
-            "Category": category,
-            "Location": location,
-            "Max Budget": budget,
-            "Respond By": respond_by,
-            "Contract Length": contract_length,
+            "RFI ID":            rfi_id,
+            "Lead Title":        title,
+            "Category":          category,
+            "Location":          location,
+            "Max Budget":        budget,
+            "Respond By":        respond_by,
+            "Contract Length":   contract_length,
             "Decision Deadline": decision_deadline,
         })
 
@@ -617,31 +684,39 @@ def parse_ariba_cards(driver):
 
     return cards
 
-
 # ---------------- ARIBA MAIN FLOW ---------------- #
 
-def search_ariba(driver):
+def search_ariba(driver, keyword_string):
     """
-    Navigate to Ariba Discovery leads, set page size, then paginate
-    through every page collecting Singapore leads.
+    Full Ariba Discovery scrape:
 
-    Key decisions:
-    - No serviceLocations filter in the URL: Ariba applies it server-side
-      and excludes leads with blank location — which is most SG leads.
-      We filter client-side via is_singapore() instead.
-    - Use UI5 firePress() for Next clicks: avoids coordinate-based click
-      failures caused by the button rendering at x>1280 in wide viewports.
+      1. Navigate with ?serviceLocations=Singapore
+         Ariba filters server-side — only SG leads are returned so we
+         paginate through far fewer pages than the global unfiltered feed.
+
+      2. Type the full keyword string into the search box.
+         Ariba OR-matches every word, so using all keywords returns every
+         lead containing any of them — exactly what you see manually.
+
+      3. Set page size to 100/50 to minimise pagination round-trips.
+
+      4. Paginate using UI5 firePress() to avoid coordinate-based click
+         failures when the Next button renders off-screen.
+
+      5. parse_ariba_cards() applies a client-side Singapore check as a
+         safety net.
     """
+
+    # Step 1 — load with Singapore server-side filter
     base_url = (
         "https://portal.us.bn.cloud.ariba.com/dashboard/appext/"
-        "comsapsbncdiscoveryui#/leads/search"
+        f"comsapsbncdiscoveryui#/leads/search"
+        f"?serviceLocations={quote('Singapore', safe='')}"
     )
-
-    print(f"\n🔍 Navigating to Ariba Discovery...")
+    print(f"\n🔍 Navigating to Ariba Discovery (Singapore filter)...")
     driver.get(base_url)
     time.sleep(5)
 
-    # Wait for the lead list to render
     try:
         WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.CSS_SELECTOR,
@@ -653,33 +728,41 @@ def search_ariba(driver):
         print("  ⚠️  Lead list not detected — proceeding anyway")
 
     time.sleep(2)
-
-    # Confirm UI5 framework is available
     check_ui5_available(driver)
 
-    initial_ids = get_all_rfi_ids(driver)
-    print(f"  📊 Initial RFIs visible: {len(initial_ids)}")
+    ids_sg_only = get_all_rfi_ids(driver)
+    print(f"  📊 RFIs with SG filter only: {len(ids_sg_only)}")
 
-    # Increase items per page before starting
+    # Step 2 — type keywords into search box on top of SG filter
+    print(f"\n  🔎 Submitting keyword search...")
+    searched = type_into_search(driver, keyword_string)
+    if not searched:
+        print("  ⚠️  Keyword search failed — continuing with SG filter only")
+
+    ids_after_search = get_all_rfi_ids(driver)
+    print(f"  📊 RFIs after keyword search: {len(ids_after_search)}")
+
+    # Step 3 — increase page size
     print("\n  ⚙️  Setting page size...")
     set_page_size(driver)
     time.sleep(2)
 
-    after_resize_ids = get_all_rfi_ids(driver)
-    print(f"  📊 RFIs after page size change: {len(after_resize_ids)}")
+    ids_after_resize = get_all_rfi_ids(driver)
+    print(f"  📊 RFIs after page size change: {len(ids_after_resize)}")
 
+    # Steps 4 & 5 — paginate and collect
     all_cards = []
-    seen_ids = set()
-    page_num = 1
+    seen_ids  = set()
+    page_num  = 1
     consecutive_empty = 0
-    MAX_PAGES = 100  # safety cap
+    MAX_PAGES = 100
 
     while page_num <= MAX_PAGES:
         print(f"\n  📄 Scraping page {page_num}...")
         time.sleep(2)
 
         cards = parse_ariba_cards(driver)
-        print(f"  Parsed {len(cards)} Singapore cards on page {page_num}")
+        print(f"  Parsed {len(cards)} Singapore cards")
 
         if not cards:
             consecutive_empty += 1
@@ -697,7 +780,7 @@ def search_ariba(driver):
 
         print(f"  Total unique cards so far: {len(all_cards)}")
 
-        # Check if we know we're on the last page
+        # Page counter check
         cur, total = get_page_numbers(driver)
         if cur and total:
             print(f"  📊 Page {cur} of {total}")
@@ -705,13 +788,14 @@ def search_ariba(driver):
                 print("  ⏹  Last page reached (page counter)")
                 break
 
-        if is_next_button_disabled(driver):
-            print("  ⏹  Next button is disabled — last page")
+        # Next button state check
+        if is_next_disabled(driver):
+            print("  ⏹  Next button disabled — last page")
             break
 
         # Snapshot state before clicking Next
         ids_before = get_all_rfi_ids(driver)
-        fp_before = get_content_fingerprint(driver)
+        fp_before  = get_content_fingerprint(driver)
 
         # Click Next
         clicked = click_next(driver)
@@ -719,10 +803,9 @@ def search_ariba(driver):
             print("  ⏹  Could not click Next — stopping")
             break
 
-        # Wait for new page content to load
+        # Wait for new content
         changed = wait_for_next_page(driver, ids_before, fp_before, timeout=30)
         if not changed:
-            # Timeout — scrape whatever is on screen then stop
             print("  ⏹  Page did not change — stopping")
             break
 
@@ -732,7 +815,7 @@ def search_ariba(driver):
     return all_cards
 
 
-def run_ariba():
+def run_ariba(keyword_string):
     driver = build_driver()
     try:
         driver.get("about:blank")
@@ -741,14 +824,14 @@ def run_ariba():
         login(driver)
 
         cur_url = driver.current_url
-        print(f"Post-login URL: {cur_url}")
+        print(f"Post-login URL:   {cur_url}")
         print(f"Post-login title: {driver.title}")
 
         if "login" in cur_url.lower() or "authenticat" in cur_url.lower():
-            print("❌ Login may have failed")
+            print("❌ Login may have failed — still on auth page")
             return []
 
-        return search_ariba(driver)
+        return search_ariba(driver, keyword_string)
 
     except Exception as e:
         print(f"❌ Ariba error: {e}")
@@ -760,24 +843,25 @@ def run_ariba():
         except Exception:
             pass
 
-
 # ---------------- AI FILTER ---------------- #
 
 def ai_filter(leads, index, threshold=0.35):
     """
-    Keep leads whose title+category semantically matches the keyword index
-    above the threshold. Threshold 0.35 is calibrated to catch logistics/
-    supply chain leads (~0.39) while dropping unrelated ones.
+    Semantic similarity filter.
+    Each lead's title + category is embedded and compared against every
+    keyword embedding. Leads scoring >= threshold are kept.
+    Threshold 0.35 catches logistics/supply chain leads (~0.39) while
+    filtering clearly unrelated ones.
     """
     out = []
     for lead in leads:
-        title = lead.get("Lead Title", "")
+        title    = lead.get("Lead Title", "")
         category = lead.get("Category", "")
 
         if not index:
             lead["AI_Matched_Keyword"] = "fallback"
-            lead["AI_Match_Score"] = 1.0
-            lead["AI_Category"] = "General"
+            lead["AI_Match_Score"]     = 1.0
+            lead["AI_Category"]        = "General"
             out.append(lead)
             print(f"  ✅ No index — keeping: {title[:60]}")
             continue
@@ -789,7 +873,6 @@ def ai_filter(leads, index, threshold=0.35):
             out.append(lead)
 
     return out
-
 
 # ---------------- MAIN ---------------- #
 
@@ -803,23 +886,32 @@ def main():
         write(get_ws(ss, name), data)
         print(f"✅ Written {len(data)} rows → '{name}'")
 
-    # Load keywords from sheet
+    # Load keywords from Google Sheet
     keywords = get_keywords(ss)
     if not keywords:
-        print("❌ No keywords — check KEYWORDS sheet has a 'Keywords' column")
+        print("❌ No keywords — check KEYWORDS sheet has a 'Keywords' column with data")
         return
 
-    # Build semantic index
+    # Join ALL keywords into one string.
+    # Ariba OR-matches every word so using all keywords maximises recall —
+    # any lead containing any keyword will appear in results.
+    keyword_string = " ".join(keywords)
+    print(f"\n🔑 Search string ({len(keywords)} keywords): {keyword_string[:120]}...")
+
+    # Build semantic index for AI filtering
     index = build_keyword_index(keywords)
-    print(f"✅ Keyword index: {len(index)} entries")
+    print(f"✅ Keyword index built: {len(index)} entries")
 
-    # Scrape Ariba (no keyword string needed — we filter AI-side)
-    raw = run_ariba()
-
+    # Scrape Ariba with Singapore filter + keyword search
+    raw = run_ariba(keyword_string)
     print(f"\nRAW RESULTS: {len(raw)}")
 
+    if not raw:
+        print("❌ No results from Ariba")
+        return
+
     # Deduplicate by RFI ID
-    seen = set()
+    seen    = set()
     deduped = []
     for r in raw:
         rid = r.get("RFI ID", "")
@@ -828,17 +920,13 @@ def main():
             deduped.append(r)
         elif not rid:
             deduped.append(r)
-
     print(f"AFTER DEDUP: {len(deduped)}")
 
-    if not deduped:
-        print("❌ No results from Ariba")
-        return
-
-    # AI filter
+    # AI relevance filter
     final = ai_filter(deduped, index)
     print(f"FINAL (after AI filter): {len(final)}")
 
+    # Write to Google Sheet
     write(get_ws(ss, TENDER_ALERTS_SHEET), final)
     print(f"✅ Written to '{TENDER_ALERTS_SHEET}' sheet")
 
