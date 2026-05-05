@@ -53,17 +53,17 @@ def enrich_lead_ai(lead, keyword_index):
     if not text:
         text = "unknown"
     kw, score = semantic_match(text, keyword_index)
-    lead["AI_Matched_Keyword"] = kw
-    lead["AI_Match_Score"] = score
+    lead["Matched_Keyword"] = kw
+    lead["Match_Score"] = score
     t = text.lower()
     if any(x in t for x in ["drug", "pharma", "vaccine", "clinical", "medical", "hospital"]):
-        lead["AI_Category"] = "Pharma/Medical"
+        lead["Match_Category"] = "Pharma/Medical"
     elif any(x in t for x in ["logistics", "supply chain", "warehouse", "distribution", "cold chain"]):
-        lead["AI_Category"] = "Logistics"
+        lead["Match_Category"] = "Logistics"
     elif any(x in t for x in ["it", "software", "cloud", "system", "digital"]):
-        lead["AI_Category"] = "IT"
+        lead["Match_Category"] = "IT"
     else:
-        lead["AI_Category"] = "General"
+        lead["Match_Category"] = "General"
     return lead, score
 
 # ---------------- CONFIG ---------------- #
@@ -859,9 +859,9 @@ def ai_filter(leads, index, threshold=0.35):
         category = lead.get("Category", "")
 
         if not index:
-            lead["AI_Matched_Keyword"] = "fallback"
-            lead["AI_Match_Score"]     = 1.0
-            lead["AI_Category"]        = "General"
+            lead["Matched_Keyword"] = "fallback"
+            lead["Match_Score"]     = 1.0
+            lead["Match_Category"]        = "General"
             out.append(lead)
             print(f"  ✅ No index — keeping: {title[:60]}")
             continue
