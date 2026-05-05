@@ -638,11 +638,6 @@ def is_singapore(location_str):
 
 
 def parse_ariba_cards(driver):
-    """
-    Parse all lead cards from the current page's rendered innerText.
-    Each card is anchored by its 'RFI · <id>' marker. We extract the block
-    of text around each marker and pull out structured fields from it.
-    """
     try:
         full_text = driver.execute_script("return document.body.innerText || '';")
     except Exception:
@@ -662,21 +657,48 @@ def parse_ariba_cards(driver):
     for idx, match in enumerate(matches):
         rfi_id = match.group(2).strip()
 
-        start = max(0, match.start() - 300)
-        end   = (matches[idx + 1].start()
-                 if idx + 1 < len(matches)
-                 else match.end() + 500)
+        # FIX: Start the block at the PREVIOUS card's RFI match end (or
+        # a small 50-char lookback) — NOT 300 chars back.
+        # This prevents the previous card's footer lines from being
+        # mistaken for this card's title.
+        if idx > 0:
+            prev_end = matches[idx - 1].end()
+            start = prev_end  # start right after previous RFI marker
+        else:
+            start = max(0, match.start() - 400)  # first card: look back for title
+
+        end = (matches[idx + 1].start()
+               if idx + 1 < len(matches)
+               else match.end() + 600)
+
         block = full_text[start:end].strip()
         lines = [l.strip() for l in block.split("\n") if l.strip()]
 
         title = category = location = budget = ""
         respond_by = contract_length = decision_deadline = ""
 
-        # Title is the line immediately before the RFI marker line
+        # FIX: Title must come from lines BEFORE the RFI marker,
+        # but only within this card's own block (not bled from previous card).
+        # Also skip lines that look like field labels from a prior card.
+        field_prefixes = (
+            "category:", "service locations:", "max budget:",
+            "respond by:", "contract length:", "decision deadline:",
+            "rfi", "rfp", "rfq"
+        )
         for i, line in enumerate(lines):
             if rfi_pattern.search(line):
-                if i > 0:
-                    title = lines[i - 1]
+                # Walk backwards from RFI line to find the real title —
+                # skip any lines that are clearly field values/labels
+                for j in range(i - 1, -1, -1):
+                    candidate = lines[j].strip()
+                    if not candidate:
+                        continue
+                    if candidate.lower().startswith(field_prefixes):
+                        continue
+                    # Must be at least 10 chars and not purely numeric
+                    if len(candidate) >= 10 and not candidate.replace(" ", "").isdigit():
+                        title = candidate
+                        break
                 break
 
         # Structured fields follow the RFI line
@@ -699,7 +721,6 @@ def parse_ariba_cards(driver):
             print(f"  ⚠️  Skipping invalid title: '{title}' (RFI {rfi_id})")
             continue
 
-        # Client-side safety net on top of the URL server-side filter
         if not is_singapore(location):
             print(f"  🌍 Skipping non-SG: '{title[:50]}' (location: '{location}')")
             skipped_location += 1
