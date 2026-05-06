@@ -6,6 +6,7 @@ import os
 import re
 import time
 import numpy as np
+from datetime import datetime
 from urllib.parse import quote
 
 from google.oauth2.service_account import Credentials
@@ -35,33 +36,50 @@ def cosine_similarity(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
-def build_keyword_index(keywords):
-    return {kw: embed(kw) for kw in keywords}
-
-
-def score_lead(lead, keyword_index, keywords):
+def build_keyword_index(keyword_weights):
     """
-    Multi-signal relevance scorer.
+    Build a semantic index from a weighted keyword dict.
 
-    Signal 1 — Exact/partial keyword match (weight 0.50)
-        Counts how many keywords appear as substrings in the lead text.
-        Normalised against 15% of total keywords so a lead must hit
-        multiple keywords to score well here.
-        Example: 25 keywords → need ~4 hits to max this signal.
+    Args:
+        keyword_weights: dict of {keyword (str): weight (float)}
 
-    Signal 2 — Top-3 semantic similarity average (weight 0.40)
-        Averages the three highest cosine similarities instead of just
-        the best. A lead must be semantically close to MULTIPLE keywords
-        to score well — a single accidental high match gets diluted.
+    Returns:
+        dict of {keyword: {"vec": np.array, "weight": float}}
+    """
+    index = {}
+    for kw, weight in keyword_weights.items():
+        index[kw] = {
+            "vec": embed(kw),
+            "weight": weight,
+        }
+    return index
+
+
+def score_lead(lead, keyword_index, keyword_weights):
+    """
+    Multi-signal relevance scorer with weighted keywords.
+
+    Signal 1 — Weighted exact/partial keyword match (weight 0.50)
+        Sums the row-weights of every keyword that appears as a substring
+        in the lead text. Normalised against the maximum possible weighted
+        sum so that hitting a high-weight group (e.g. PHI names at 0.7)
+        contributes far more than hitting low-weight terms.
+
+        Example: hitting "TTSH" (group weight 0.7) scores much higher than
+        hitting "cold chain" (group weight 0.1).
+
+    Signal 2 — Top-3 weighted semantic similarity average (weight 0.40)
+        Computes cosine similarity for all keywords, multiplies each by its
+        group weight, then averages the top-3 weighted scores. This means
+        semantic closeness to a high-weight PHI name matters more than
+        closeness to a generic logistics term.
 
     Signal 3 — Category field boost (weight 0.10)
-        If the Ariba category label contains a high-value term, add a
-        small additive boost so clearly relevant leads with sparse titles
-        are not accidentally dropped.
+        Small additive boost when the Ariba category label contains a
+        high-value term.
 
     Final score = weighted sum capped at 1.0.
     Recommended threshold: 0.5
-
     """
     title    = lead.get("Lead Title", "").lower()
     category = lead.get("Category", "").lower()
@@ -70,24 +88,34 @@ def score_lead(lead, keyword_index, keywords):
     if not text.strip():
         return 0.0, [], "none"
 
-    # ── Signal 1: Exact keyword hit count ──────────────────────────────
+    # ── Signal 1: Weighted exact keyword hit sum ───────────────────────
     hits = []
-    for kw in keywords:
+    weighted_hit_sum = 0.0
+    max_possible_weight = sum(keyword_weights.values()) if keyword_weights else 1.0
+
+    for kw, weight in keyword_weights.items():
         if kw.lower() in text:
             hits.append(kw)
+            weighted_hit_sum += weight
 
-    # Normalise: hitting 15%+ of all keywords maxes out this signal
-    exact_score = min(len(hits) / max(len(keywords) * 0.15, 1), 1.0)
+    # Normalise against max possible weight sum
+    exact_score = min(weighted_hit_sum / max(max_possible_weight * 0.15, 0.01), 1.0)
 
-    # ── Signal 2: Top-3 semantic similarity average ────────────────────
+    # ── Signal 2: Top-3 weighted semantic similarity average ───────────
     if keyword_index:
         text_vec = embed(text)
-        sims = sorted(
-            [cosine_similarity(text_vec, vec) for vec in keyword_index.values()],
+        weighted_sims = sorted(
+            [
+                cosine_similarity(text_vec, entry["vec"]) * entry["weight"]
+                for entry in keyword_index.values()
+            ],
             reverse=True
         )
-        top_n = sims[:3]
-        semantic_score = sum(top_n) / len(top_n)
+        top_n = weighted_sims[:3]
+        # Normalise: max possible per entry is 1.0 * max_weight
+        max_weight = max(keyword_weights.values()) if keyword_weights else 1.0
+        semantic_score = (sum(top_n) / len(top_n)) / max_weight if top_n else 0.0
+        semantic_score = min(semantic_score, 1.0)
     else:
         semantic_score = 0.0
 
@@ -118,8 +146,8 @@ def _classify(hits, title, category):
     return "General"
 
 
-def enrich_lead_ai(lead, keyword_index, keywords):
-    score, hits, match_cat = score_lead(lead, keyword_index, keywords)
+def enrich_lead_ai(lead, keyword_index, keyword_weights):
+    score, hits, match_cat = score_lead(lead, keyword_index, keyword_weights)
     lead["Match_Score"]       = score
     lead["Matched_Keywords"]  = ", ".join(hits) if hits else ""
     lead["Keyword_Hit_Count"] = len(hits)
@@ -220,37 +248,118 @@ def write(ws, data):
     ws.update([headers] + [[r.get(h, "") for h in headers] for r in data])
 
 
-# ---------------- KEYWORDS ---------------- #
+# ---------------- KEYWORDS (WEIGHTED) ---------------- #
+
+def _parse_date(date_str):
+    """Parse a date string like '17 Apr 2026' into a date object. Returns None if blank/invalid."""
+    if not date_str or not date_str.strip():
+        return None
+    for fmt in ("%d %b %Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(date_str.strip(), fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _is_active(row):
+    """
+    Return True if this keyword row should be used today.
+    - Commission Date must be today or in the past (or blank → always active)
+    - Decommission Date must be in the future (or blank → never expires)
+    """
+    today = datetime.today().date()
+
+    commission_str   = row.get("Commission Date", "").strip()
+    decommission_str = row.get("Decommission Date", "").strip()
+
+    commission_date   = _parse_date(commission_str)
+    decommission_date = _parse_date(decommission_str)
+
+    if commission_date and commission_date > today:
+        return False  # not yet active
+
+    if decommission_date and decommission_date <= today:
+        return False  # expired
+
+    return True
+
 
 def get_keywords(ss):
+    """
+    Load keywords from the KEYWORDS sheet and return a weighted dict.
+
+    Expected columns: S/N | Keywords | Commission Date | Decommission Date | Weighted % | Remarks
+
+    Returns:
+        dict of {keyword (str): weight (float)}
+
+    Behaviour:
+    - Rows whose Commission Date is in the future are skipped.
+    - Rows whose Decommission Date is today or past are skipped.
+    - The 'Weighted %' column is parsed as a float (e.g. "0.7" → 0.7).
+      If missing or unparseable, defaults to 1.0 so existing rows still work.
+    - Each row's keyword string is split on whitespace, commas, or semicolons.
+      Every individual token inherits the row's weight.
+    - Duplicate tokens keep the HIGHEST weight seen across rows.
+    """
     try:
-        ws = ss.worksheet("KEYWORDS")
-        raw = [
-            (r.get("Keywords") or "").strip()
-            for r in ws.get_all_records()
-            if r.get("Keywords")
-        ]
-        kws = []
-        for entry in raw:
-            parts = re.split(r'[,;\n]+', entry)
-            for p in parts:
-                p = p.strip().lower()
-                if p:
-                    if len(p.split()) > 6:
-                        kws.extend(p.split())
-                    else:
-                        kws.append(p)
-        seen = set()
-        unique_kws = []
-        for k in kws:
-            if k not in seen:
-                seen.add(k)
-                unique_kws.append(k)
-        print(f"✅ Loaded {len(unique_kws)} keywords: {unique_kws[:10]}")
-        return unique_kws
+        ws  = ss.worksheet("KEYWORDS")
+        rows = ws.get_all_records()
+
+        keyword_weights = {}
+        skipped_inactive = 0
+        skipped_no_kw    = 0
+
+        for row in rows:
+            # ── Date-based activation check ───────────────────────────
+            if not _is_active(row):
+                skipped_inactive += 1
+                continue
+
+            # ── Parse weight ──────────────────────────────────────────
+            raw_weight = str(row.get("Weighted %", "") or "").strip()
+            try:
+                weight = float(raw_weight)
+            except ValueError:
+                weight = 1.0  # default if column is missing or non-numeric
+
+            # ── Parse keywords ────────────────────────────────────────
+            raw_kw = (row.get("Keywords") or "").strip()
+            if not raw_kw:
+                skipped_no_kw += 1
+                continue
+
+            # Split on whitespace, comma, or semicolon
+            tokens = re.split(r'[,;\s]+', raw_kw)
+            for token in tokens:
+                token = token.strip().lower()
+                if not token:
+                    continue
+                # Keep highest weight if token appears in multiple rows
+                if token in keyword_weights:
+                    keyword_weights[token] = max(keyword_weights[token], weight)
+                else:
+                    keyword_weights[token] = weight
+
+        print(
+            f"✅ Loaded {len(keyword_weights)} weighted keywords "
+            f"({skipped_inactive} rows skipped — inactive, "
+            f"{skipped_no_kw} rows skipped — no keywords)"
+        )
+
+        # Debug: show a sample of keywords with their weights
+        sample = list(keyword_weights.items())[:12]
+        for kw, w in sample:
+            print(f"   {w:.2f}  {kw}")
+        if len(keyword_weights) > 12:
+            print(f"   ... and {len(keyword_weights) - 12} more")
+
+        return keyword_weights
+
     except Exception as e:
         print(f"⚠️ Could not load KEYWORDS sheet: {e}")
-        return []
+        return {}
 
 
 # ---------------- SELENIUM DRIVER ---------------- #
@@ -261,9 +370,6 @@ def build_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    # 1280x900 keeps the pagination bar inside the headless click region.
-    # At wider viewports the Next button renders off-screen and clicks
-    # are silently ignored by headless Chrome.
     options.add_argument("--window-size=1280,900")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-infobars")
@@ -290,7 +396,6 @@ def login(driver):
 # ---------------- UI5 DIAGNOSTICS ---------------- #
 
 def check_ui5_available(driver):
-    """Log whether sap.ui is loaded and how many controls are registered."""
     result = driver.execute_script("""
         try {
             var v = sap.ui.version;
@@ -307,11 +412,6 @@ def check_ui5_available(driver):
 # ---------------- PAGE SIZE ---------------- #
 
 def set_page_size(driver):
-    """
-    Open the UI5 sapMSlt items-per-page dropdown and select the largest
-    available option. Ariba Discovery max is 50 — do NOT try 100 as it
-    does not exist and clicking it may select the wrong element.
-    """
     try:
         controls = driver.find_elements(By.CSS_SELECTOR, "[class*='sapMSlt']")
         if not controls:
@@ -331,7 +431,6 @@ def set_page_size(driver):
         """, ctrl)
         time.sleep(1.5)
 
-        # FIX: Removed "100" — confirmed Ariba Discovery max is 50
         for val in ["50", "25"]:
             opts = driver.find_elements(By.XPATH,
                 f"//*[@role='option' and contains(normalize-space(.), '{val}')]"
@@ -356,11 +455,6 @@ def set_page_size(driver):
 # ---------------- SEARCH BOX ---------------- #
 
 def type_into_search(driver, keyword_string):
-    """
-    Type the full keyword string into Ariba's search box.
-    Ariba OR-matches every word so using all keywords maximises recall —
-    any lead containing any keyword will appear in results.
-    """
     search_selectors = [
         "input[placeholder*='Search']",
         "input[placeholder*='search']",
@@ -412,7 +506,6 @@ def type_into_search(driver, keyword_string):
 # ---------------- PAGE STATE HELPERS ---------------- #
 
 def get_all_rfi_ids(driver):
-    """Return frozenset of all RFI IDs currently rendered on the page."""
     try:
         text = driver.execute_script("return document.body.innerText || '';")
         pattern = re.compile(r'RFI\s*[\u00b7\u2022\-|]\s*(\d{7,12})', re.IGNORECASE)
@@ -422,11 +515,6 @@ def get_all_rfi_ids(driver):
 
 
 def get_page_numbers(driver):
-    """
-    Extract (current_page, total_pages) from UI5 pagination text.
-    Ariba renders this as '1 of 12' or '1/12'.
-    Returns (None, None) if not found.
-    """
     try:
         text = driver.execute_script("return document.body.innerText || '';")
         m = re.search(r'(?:page\s+)?(\d+)\s*(?:of|/)\s*(\d+)', text, re.IGNORECASE)
@@ -438,7 +526,6 @@ def get_page_numbers(driver):
 
 
 def get_content_fingerprint(driver):
-    """Short fingerprint of current page content for change detection."""
     try:
         text = driver.execute_script("return document.body.innerText || '';")
         m = re.search(r'RFI\s*[\u00b7\u2022\-|]\s*\d{7,12}', text, re.IGNORECASE)
@@ -448,7 +535,6 @@ def get_content_fingerprint(driver):
 
 
 def is_next_disabled(driver):
-    """Return True if the Next Page button exists and is aria-disabled."""
     try:
         btns = driver.find_elements(By.CSS_SELECTOR,
             "button[aria-label*='Next Page'], button[aria-label*='Next']")
@@ -463,10 +549,6 @@ def is_next_disabled(driver):
 # ---------------- DEBUG BUTTONS ---------------- #
 
 def debug_buttons(driver):
-    """
-    Print all visible buttons on the page to diagnose pagination failures.
-    Called automatically when all Next click strategies are exhausted.
-    """
     try:
         info = driver.execute_script("""
             var btns = document.querySelectorAll('button');
@@ -488,23 +570,6 @@ def debug_buttons(driver):
 # ---------------- CLICK NEXT ---------------- #
 
 def click_next(driver):
-    """
-    Click the Next Page button using UI5-native firePress() first,
-    then fall back through DOM strategies.
-
-    Why firePress() and not ActionChains:
-    ActionChains computes coordinates from getBoundingClientRect(). At wide
-    viewports the button renders off-screen and the click is silently
-    ignored even though Selenium reports success. firePress() goes through
-    UI5's own event bus with no coordinates needed.
-
-    FIX: Extended button ID scan range from 60 → 500 to handle deep
-    pagination (IDs increment ~9 per page; page 42 needs ~__button420).
-    FIX: Strategy 3 now attempts UI5 firePress() via the element's own ID
-    before falling back to plain .click(), which UI5 often ignores.
-    FIX: debug_buttons() called when all strategies exhausted.
-    """
-
     # ── Strategy 1: scan all registered UI5 controls for Next button ──
     result = driver.execute_script("""
         try {
@@ -539,8 +604,6 @@ def click_next(driver):
         return True
 
     # ── Strategy 2: firePress by scanning Ariba button ID range ──
-    # FIX: Extended upper bound 60 → 500
-    # Pattern: IDs increment ~9 per page → page 42 needs ~__button420
     result = driver.execute_script("""
         try {
             var core = sap.ui.getCore();
@@ -570,7 +633,6 @@ def click_next(driver):
         return True
 
     # ── Strategy 3: last button inside the pagination wrapper ──
-    # FIX: Try UI5 firePress() via element ID before plain DOM .click()
     result = driver.execute_script("""
         try {
             var wrapper = document.querySelector(
@@ -654,7 +716,6 @@ def click_next(driver):
     except Exception as e:
         print(f"  ⚠️  [S5] ActionChains failed: {e}")
 
-    # All strategies exhausted — dump buttons for diagnosis
     print("  ❌ All Next click strategies exhausted")
     debug_buttons(driver)
     return False
@@ -663,16 +724,7 @@ def click_next(driver):
 # ---------------- WAIT FOR PAGE CHANGE ---------------- #
 
 def wait_for_next_page(driver, old_ids, old_fingerprint, timeout=60):
-    """
-    Poll until the page content changes after clicking Next.
-    FIX: Default timeout increased 30s → 60s for slow Ariba XHR responses.
-
-    Two independent change signals:
-      A) RFI ID frozenset differs from the previous page
-      B) Content fingerprint (first 400 chars around first card) differs
-    Also exits early if Next becomes disabled (just loaded last page).
-    """
-    time.sleep(2)  # let UI5 start its XHR / re-render cycle
+    time.sleep(2)
 
     deadline = time.time() + timeout
     poll = 0
@@ -710,28 +762,12 @@ def wait_for_next_page(driver, old_ids, old_fingerprint, timeout=60):
 # ---------------- CARD PARSING ---------------- #
 
 def is_singapore(location_str):
-    """
-    Return True if location is Singapore or blank.
-    Blank kept because many SG tenders don't populate the location field.
-    """
     if not location_str:
         return True
     return any(term in location_str.lower() for term in ALLOWED_LOCATIONS)
 
 
 def parse_ariba_cards(driver):
-    """
-    Parse all lead cards from the current page's rendered innerText.
-
-    FIX: Block start boundary changed from fixed -300 chars to
-    matches[idx-1].end() so each card's text window is cleanly isolated
-    from the previous card. Prevents previous card's footer lines
-    (category, budget, deadline) from bleeding into this card's title.
-
-    FIX: Title selection now walks backwards from the RFI line skipping
-    any line that starts with a known field prefix, so field labels from
-    a prior card can never be mistaken for the title.
-    """
     try:
         full_text = driver.execute_script("return document.body.innerText || '';")
     except Exception:
@@ -748,7 +784,6 @@ def parse_ariba_cards(driver):
 
     skipped_location = 0
 
-    # Field prefixes to skip when walking backwards for the title
     field_prefixes = (
         "category:", "service locations:", "max budget:",
         "respond by:", "contract length:", "decision deadline:",
@@ -758,8 +793,6 @@ def parse_ariba_cards(driver):
     for idx, match in enumerate(matches):
         rfi_id = match.group(2).strip()
 
-        # FIX: Start block right after the previous RFI marker ends,
-        # not 300 chars before the current one
         if idx > 0:
             start = matches[idx - 1].end()
         else:
@@ -775,7 +808,6 @@ def parse_ariba_cards(driver):
         title = category = location = budget = ""
         respond_by = contract_length = decision_deadline = ""
 
-        # FIX: Walk backwards from the RFI line, skip field label lines
         for i, line in enumerate(lines):
             if rfi_pattern.search(line):
                 for j in range(i - 1, -1, -1):
@@ -789,7 +821,6 @@ def parse_ariba_cards(driver):
                         break
                 break
 
-        # Structured fields follow the RFI line
         for line in lines:
             ll = line.lower()
             if ll.startswith("category:"):
@@ -835,14 +866,6 @@ def parse_ariba_cards(driver):
 # ---------------- ARIBA MAIN FLOW ---------------- #
 
 def search_ariba(driver, keyword_string):
-    """
-    Full Ariba Discovery scrape:
-      1. Navigate with ?serviceLocations=Singapore (server-side filter)
-      2. Type keyword string into search box (OR-match maximises recall)
-      3. Set page size to 50 (confirmed Ariba Discovery maximum)
-      4. Paginate via UI5 firePress() with extended ID range (→500)
-      5. parse_ariba_cards() isolates card blocks and extracts clean titles
-    """
     base_url = (
         "https://portal.us.bn.cloud.ariba.com/dashboard/appext/"
         f"comsapsbncdiscoveryui#/leads/search"
@@ -973,19 +996,19 @@ def run_ariba(keyword_string):
 
 # ---------------- AI FILTER ---------------- #
 
-def ai_filter(leads, index, keywords, threshold=0.5):
+def ai_filter(leads, index, keyword_weights, threshold=0.5):
     """
-    Multi-signal relevance filter.
+    Multi-signal relevance filter using weighted keywords.
 
-    Threshold raised from 0.35 → 0.5 to match the new scorer which
-    combines three signals:
-      - Exact keyword hit count   (weight 0.50) — must hit multiple keywords
-      - Top-3 semantic similarity (weight 0.40) — must be broadly relevant
-      - Category field boost      (weight 0.10) — rewards pharma/logistics labels
+    threshold=0.5 is appropriate for the weighted scorer:
+      - Hitting a single high-weight PHI name (0.7 group) alone scores ~0.35
+        (Signal 1 exact hit * 0.50 weight + semantic contribution)
+      - A lead must combine keyword hits + semantic similarity to clear 0.5
+      - This prevents false positives from single-word PHI matches on
+        unrelated tenders while still surfacing genuinely relevant leads
 
-    Prints per-lead detail for easy auditing. Matched_Keywords and
-    Keyword_Hit_Count are written to the sheet so you can review why
-    each lead was kept and tune the threshold if needed.
+    Prints per-lead scores for auditing. The sheet includes:
+      Match_Score, Matched_Keywords, Keyword_Hit_Count, Match_Category
     """
     out = []
     for lead in leads:
@@ -997,7 +1020,7 @@ def ai_filter(leads, index, keywords, threshold=0.5):
             out.append(lead)
             continue
 
-        lead, score = enrich_lead_ai(lead, index, keywords)
+        lead, score = enrich_lead_ai(lead, index, keyword_weights)
         status = "✅ KEEP" if score >= threshold else "❌ DROP"
         print(
             f"  {status} {score:.3f} | hits={lead['Keyword_Hit_Count']:2d} "
@@ -1026,19 +1049,20 @@ def main():
         write(get_ws(ss, name), data)
         print(f"✅ Written {len(data)} rows → '{name}'")
 
-    # Load keywords from Google Sheet
-    keywords = get_keywords(ss)
-    if not keywords:
-        print("❌ No keywords — check KEYWORDS sheet has a 'Keywords' column with data")
+    # Load weighted keywords from Google Sheet
+    keyword_weights = get_keywords(ss)
+    if not keyword_weights:
+        print("❌ No keywords — check KEYWORDS sheet has 'Keywords' and 'Weighted %' columns")
         return
 
-    # Join ALL keywords into one string for Ariba search box.
+    # Join ALL keyword tokens into one string for Ariba search box.
     # Ariba OR-matches every word so using all keywords maximises recall.
-    keyword_string = " ".join(keywords)
-    print(f"\n🔑 Search string ({len(keywords)} keywords): {keyword_string[:120]}...")
+    # We use the keys (individual tokens) for the search string.
+    keyword_string = " ".join(keyword_weights.keys())
+    print(f"\n🔑 Search string ({len(keyword_weights)} tokens): {keyword_string[:120]}...")
 
-    # Build semantic index for AI filtering
-    index = build_keyword_index(keywords)
+    # Build weighted semantic index for AI filtering
+    index = build_keyword_index(keyword_weights)
     print(f"✅ Keyword index built: {len(index)} entries")
 
     # Scrape Ariba
@@ -1061,8 +1085,8 @@ def main():
             deduped.append(r)
     print(f"AFTER DEDUP: {len(deduped)}")
 
-    # AI relevance filter — pass full keywords list for exact-match signal
-    final = ai_filter(deduped, index, keywords)
+    # AI relevance filter — pass full weighted keyword dict
+    final = ai_filter(deduped, index, keyword_weights)
     print(f"FINAL (after AI filter): {len(final)}")
 
     # Write to Google Sheet
