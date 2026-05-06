@@ -182,8 +182,8 @@ ALLOWED_LOCATIONS = ["singapore", "sg"]
 
 SMTP_HOST      = "smtp.office365.com"
 SMTP_PORT      = 587
-SMTP_USER      = os.getenv("SMTP_USER", "")       # your Outlook email
-SMTP_PASSWORD  = os.getenv("SMTP_PASSWORD", "")   # your Outlook app password
+SMTP_USER      = "sherman.ang@sswlogistics.sg"       # your Outlook email
+SMTP_PASSWORD  = "Cckss@202721"   # your Outlook app password
 EMAIL_LIST_SHEET   = "Email List"
 ALERTED_IDS_SHEET  = "Alerted IDs"
 EMAIL_ALERT_THRESHOLD = 0.7
