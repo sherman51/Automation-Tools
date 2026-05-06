@@ -180,10 +180,10 @@ ALLOWED_LOCATIONS = ["singapore", "sg"]
 
 # ---------------- EMAIL CONFIG ---------------- #
 
-SMTP_HOST      = "smtp.office365.com"
+SMTP_HOST      = "smtp.gmail.com"
 SMTP_PORT      = 587
-SMTP_USER      = "sherman.ang@sswlogistics.sg"       # your Outlook email
-SMTP_PASSWORD  = "Cckss@202721"   # your Outlook app password
+SMTP_USER      = "shermanang5@gmail.com"       
+SMTP_PASSWORD  = "xoju npki hvvw wyql"   
 EMAIL_LIST_SHEET   = "Email List"
 ALERTED_IDS_SHEET  = "Alerted IDs"
 EMAIL_ALERT_THRESHOLD = 0.7
