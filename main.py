@@ -6,7 +6,10 @@ import os
 import re
 import time
 import numpy as np
+import smtplib
 from datetime import datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from urllib.parse import quote
 
 from google.oauth2.service_account import Credentials
@@ -59,7 +62,7 @@ def score_lead(lead, keyword_index, keyword_weights):
     """
     Multi-signal relevance scorer with weighted keywords.
 
-    Signal 1 — Weighted exact/partial keyword match (weight 0.70)
+    Signal 1 — Weighted exact/partial keyword match (weight 0.50)
         Sums the row-weights of every keyword that appears as a substring
         in the lead text. Normalised against the maximum possible weighted
         sum so that hitting a high-weight group (e.g. PHI names at 0.7)
@@ -68,13 +71,13 @@ def score_lead(lead, keyword_index, keyword_weights):
         Example: hitting "TTSH" (group weight 0.7) scores much higher than
         hitting "cold chain" (group weight 0.1).
 
-    Signal 2 — Top-3 weighted semantic similarity average (weight 0.25)
+    Signal 2 — Top-3 weighted semantic similarity average (weight 0.40)
         Computes cosine similarity for all keywords, multiplies each by its
         group weight, then averages the top-3 weighted scores. This means
         semantic closeness to a high-weight PHI name matters more than
         closeness to a generic logistics term.
 
-    Signal 3 — Category field boost (weight 0.05)
+    Signal 3 — Category field boost (weight 0.10)
         Small additive boost when the Ariba category label contains a
         high-value term.
 
@@ -125,10 +128,10 @@ def score_lead(lead, keyword_index, keyword_weights):
         "logistics", "supply chain", "cold chain", "distribution",
         "warehouse", "hospital", "medical"
     ]
-    category_boost = 0.05 if any(t in category for t in boost_terms) else 0.0
+    category_boost = 0.10 if any(t in category for t in boost_terms) else 0.0
 
     # ── Weighted final score ───────────────────────────────────────────
-    final = (exact_score * 0.70) + (semantic_score * 0.25) + category_boost
+    final = (exact_score * 0.50) + (semantic_score * 0.40) + category_boost
     final = round(min(final, 1.0), 3)
 
     match_cat = _classify(hits, title, category)
@@ -174,6 +177,16 @@ ARIBA_USERNAME = os.getenv("ARIBA_USERNAME", "")
 ARIBA_PASSWORD = os.getenv("ARIBA_PASSWORD", "")
 
 ALLOWED_LOCATIONS = ["singapore", "sg"]
+
+# ---------------- EMAIL CONFIG ---------------- #
+
+SMTP_HOST      = "smtp.office365.com"
+SMTP_PORT      = 587
+SMTP_USER      = os.getenv("SMTP_USER", "")       # your Outlook email
+SMTP_PASSWORD  = os.getenv("SMTP_PASSWORD", "")   # your Outlook app password
+EMAIL_LIST_SHEET   = "Email List"
+ALERTED_IDS_SHEET  = "Alerted IDs"
+EMAIL_ALERT_THRESHOLD = 0.7
 
 # ---------------- ALPS SCRAPER ---------------- #
 
@@ -1037,6 +1050,225 @@ def ai_filter(leads, index, keyword_weights, threshold=0.5):
     return out
 
 
+# ---------------- ALERTED IDS ---------------- #
+
+def get_alerted_ids(ss):
+    """
+    Load all previously alerted RFI IDs from the 'Alerted IDs' sheet.
+    Returns a set of RFI ID strings.
+    Creates the sheet with headers if it doesn't exist yet.
+    """
+    try:
+        ws = get_ws(ss, ALERTED_IDS_SHEET)
+        records = ws.get_all_records()
+        ids = {str(r.get("RFI ID", "")).strip() for r in records if r.get("RFI ID")}
+        print(f"✅ Loaded {len(ids)} previously alerted RFI IDs")
+        return ids
+    except Exception as e:
+        print(f"⚠️  Could not load Alerted IDs sheet: {e}")
+        return set()
+
+
+def save_alerted_ids(ss, new_leads):
+    """
+    Append newly alerted RFI IDs to the 'Alerted IDs' sheet.
+    Each row records: RFI ID, Lead Title, Match Score, Date Alerted.
+    """
+    if not new_leads:
+        return
+    try:
+        ws = get_ws(ss, ALERTED_IDS_SHEET)
+
+        # Write headers if sheet is empty
+        existing = ws.get_all_values()
+        if not existing or not existing[0]:
+            ws.append_row(["RFI ID", "Lead Title", "Match Score", "Date Alerted"])
+
+        today = datetime.today().strftime("%d %b %Y %H:%M")
+        rows = [
+            [
+                lead.get("RFI ID", ""),
+                lead.get("Lead Title", ""),
+                lead.get("Match_Score", ""),
+                today,
+            ]
+            for lead in new_leads
+        ]
+        ws.append_rows(rows)
+        print(f"✅ Saved {len(rows)} new RFI IDs to '{ALERTED_IDS_SHEET}'")
+    except Exception as e:
+        print(f"⚠️  Could not save Alerted IDs: {e}")
+
+
+# ---------------- EMAIL LIST ---------------- #
+
+def get_email_recipients(ss):
+    """
+    Load recipients from the 'Email List' sheet.
+    Expected columns: S/N | Email | Name
+    Returns a list of dicts: [{"email": ..., "name": ...}, ...]
+    """
+    try:
+        ws      = ss.worksheet(EMAIL_LIST_SHEET)
+        records = ws.get_all_records()
+        recipients = []
+        for r in records:
+            email = (r.get("Email") or "").strip()
+            name  = (r.get("Name")  or "").strip()
+            if email and "@" in email:
+                recipients.append({"email": email, "name": name or email})
+        print(f"✅ Loaded {len(recipients)} email recipients")
+        return recipients
+    except Exception as e:
+        print(f"⚠️  Could not load Email List sheet: {e}")
+        return []
+
+
+# ---------------- EMAIL SENDER ---------------- #
+
+def _build_email_html(recipient_name, leads, run_date):
+    """
+    Build a clean HTML email body listing all new high-scoring leads.
+    One email per recipient so we can personalise the greeting.
+    """
+    rows_html = ""
+    for lead in leads:
+        score_pct  = f"{lead.get('Match_Score', 0) * 100:.0f}%"
+        title      = lead.get("Lead Title", "—")
+        category   = lead.get("Category", "—")
+        keywords   = lead.get("Matched_Keywords", "—")
+        respond_by = lead.get("Respond By", "—") or "—"
+        link       = lead.get("Link", "#")
+        rfi_id     = lead.get("RFI ID", "—")
+
+        rows_html += f"""
+        <tr>
+            <td style="padding:10px 8px;border-bottom:1px solid #eee;">
+                <a href="{link}" style="font-weight:600;color:#0055a5;text-decoration:none;">
+                    {title}
+                </a><br>
+                <span style="font-size:12px;color:#888;">RFI {rfi_id}</span>
+            </td>
+            <td style="padding:10px 8px;border-bottom:1px solid #eee;text-align:center;">
+                <span style="
+                    background:#e6f4ea;color:#1a7340;
+                    padding:3px 8px;border-radius:12px;
+                    font-weight:700;font-size:13px;">
+                    {score_pct}
+                </span>
+            </td>
+            <td style="padding:10px 8px;border-bottom:1px solid #eee;font-size:13px;color:#555;">
+                {category}
+            </td>
+            <td style="padding:10px 8px;border-bottom:1px solid #eee;font-size:12px;color:#555;">
+                {keywords}
+            </td>
+            <td style="padding:10px 8px;border-bottom:1px solid #eee;font-size:13px;color:#555;">
+                {respond_by}
+            </td>
+        </tr>
+        """
+
+    html = f"""
+    <html><body style="font-family:Arial,sans-serif;color:#333;margin:0;padding:0;">
+    <div style="max-width:900px;margin:30px auto;padding:0 20px;">
+
+        <div style="background:#0055a5;padding:20px 24px;border-radius:8px 8px 0 0;">
+            <h2 style="color:#fff;margin:0;font-size:20px;">🔔 Tender Alert — {run_date}</h2>
+        </div>
+
+        <div style="background:#f9f9f9;padding:20px 24px;border:1px solid #ddd;border-top:none;">
+            <p style="margin:0 0 6px;">Hi <strong>{recipient_name}</strong>,</p>
+            <p style="margin:0;">
+                The following <strong>{len(leads)} new tender lead{"s" if len(leads) != 1 else ""}</strong>
+                scored above {int(EMAIL_ALERT_THRESHOLD * 100)}% relevance in today's Ariba scan.
+            </p>
+        </div>
+
+        <table style="width:100%;border-collapse:collapse;border:1px solid #ddd;border-top:none;">
+            <thead>
+                <tr style="background:#f0f4f9;">
+                    <th style="padding:10px 8px;text-align:left;font-size:13px;">Lead Title</th>
+                    <th style="padding:10px 8px;text-align:center;font-size:13px;">Score</th>
+                    <th style="padding:10px 8px;text-align:left;font-size:13px;">Category</th>
+                    <th style="padding:10px 8px;text-align:left;font-size:13px;">Matched Keywords</th>
+                    <th style="padding:10px 8px;text-align:left;font-size:13px;">Respond By</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html}
+            </tbody>
+        </table>
+
+        <div style="padding:16px 0;font-size:12px;color:#aaa;text-align:center;">
+            This is an automated alert. Do not reply to this email.
+        </div>
+    </div>
+    </body></html>
+    """
+    return html
+
+
+def send_alert_emails(recipients, new_leads, run_date):
+    """
+    Send one personalised HTML email per recipient listing all new leads.
+    Uses Office365 SMTP with TLS (port 587).
+    Skips sending if no recipients or no leads.
+    """
+    if not recipients:
+        print("⚠️  No recipients found — skipping email")
+        return
+    if not new_leads:
+        print("📭 No new leads above email threshold — skipping email")
+        return
+    if not SMTP_USER or not SMTP_PASSWORD:
+        print("⚠️  SMTP_USER or SMTP_PASSWORD not set — skipping email")
+        return
+
+    subject = (
+        f"[Tender Alert] {len(new_leads)} new lead"
+        f"{'s' if len(new_leads) != 1 else ''} found — {run_date}"
+    )
+
+    sent  = 0
+    failed = 0
+
+    try:
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+        server.ehlo()
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+
+        for r in recipients:
+            try:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = subject
+                msg["From"]    = SMTP_USER
+                msg["To"]      = r["email"]
+
+                html_body = _build_email_html(r["name"], new_leads, run_date)
+                msg.attach(MIMEText(html_body, "html"))
+
+                server.sendmail(SMTP_USER, r["email"], msg.as_string())
+                print(f"  ✉️  Sent to {r['name']} <{r['email']}>")
+                sent += 1
+
+            except Exception as e:
+                print(f"  ❌ Failed to send to {r['email']}: {e}")
+                failed += 1
+
+        server.quit()
+
+    except smtplib.SMTPAuthenticationError:
+        print("❌ SMTP authentication failed — check SMTP_USER and SMTP_PASSWORD")
+        return
+    except Exception as e:
+        print(f"❌ SMTP connection error: {e}")
+        return
+
+    print(f"\n✅ Email summary: {sent} sent, {failed} failed")
+
+
 # ---------------- MAIN ---------------- #
 
 def main():
@@ -1057,7 +1289,6 @@ def main():
 
     # Join ALL keyword tokens into one string for Ariba search box.
     # Ariba OR-matches every word so using all keywords maximises recall.
-    # We use the keys (individual tokens) for the search string.
     keyword_string = " ".join(keyword_weights.keys())
     print(f"\n🔑 Search string ({len(keyword_weights)} tokens): {keyword_string[:120]}...")
 
@@ -1085,13 +1316,40 @@ def main():
             deduped.append(r)
     print(f"AFTER DEDUP: {len(deduped)}")
 
-    # AI relevance filter — pass full weighted keyword dict
-    final = ai_filter(deduped, index, keyword_weights)
+    # AI relevance filter — sheet threshold 0.5
+    final = ai_filter(deduped, index, keyword_weights, threshold=0.5)
     print(f"FINAL (after AI filter): {len(final)}")
 
-    # Write to Google Sheet
+    # Write all filtered leads (score >= 0.5) to Google Sheet
     write(get_ws(ss, TENDER_ALERTS_SHEET), final)
     print(f"✅ Written to '{TENDER_ALERTS_SHEET}' sheet")
+
+    # ── Email alert: only NEW leads above 0.7 threshold ───────────────
+    run_date     = datetime.today().strftime("%d %b %Y")
+    alerted_ids  = get_alerted_ids(ss)
+    recipients   = get_email_recipients(ss)
+
+    # Filter to high-scoring leads not previously alerted
+    high_score_leads = [
+        lead for lead in final
+        if lead.get("Match_Score", 0) >= EMAIL_ALERT_THRESHOLD
+    ]
+    new_leads = [
+        lead for lead in high_score_leads
+        if str(lead.get("RFI ID", "")).strip() not in alerted_ids
+    ]
+
+    print(f"\n📊 Email alert summary:")
+    print(f"   Leads above {int(EMAIL_ALERT_THRESHOLD * 100)}% threshold : {len(high_score_leads)}")
+    print(f"   Already alerted (skipped)    : {len(high_score_leads) - len(new_leads)}")
+    print(f"   New leads to email           : {len(new_leads)}")
+
+    if new_leads:
+        send_alert_emails(recipients, new_leads, run_date)
+        save_alerted_ids(ss, new_leads)
+    else:
+        print("📭 No new leads to alert — skipping email")
+
 
 
 if __name__ == "__main__":
