@@ -59,7 +59,7 @@ def score_lead(lead, keyword_index, keyword_weights):
     """
     Multi-signal relevance scorer with weighted keywords.
 
-    Signal 1 — Weighted exact/partial keyword match (weight 0.50)
+    Signal 1 — Weighted exact/partial keyword match (weight 0.70)
         Sums the row-weights of every keyword that appears as a substring
         in the lead text. Normalised against the maximum possible weighted
         sum so that hitting a high-weight group (e.g. PHI names at 0.7)
@@ -68,13 +68,13 @@ def score_lead(lead, keyword_index, keyword_weights):
         Example: hitting "TTSH" (group weight 0.7) scores much higher than
         hitting "cold chain" (group weight 0.1).
 
-    Signal 2 — Top-3 weighted semantic similarity average (weight 0.40)
+    Signal 2 — Top-3 weighted semantic similarity average (weight 0.25)
         Computes cosine similarity for all keywords, multiplies each by its
         group weight, then averages the top-3 weighted scores. This means
         semantic closeness to a high-weight PHI name matters more than
         closeness to a generic logistics term.
 
-    Signal 3 — Category field boost (weight 0.10)
+    Signal 3 — Category field boost (weight 0.05)
         Small additive boost when the Ariba category label contains a
         high-value term.
 
@@ -125,10 +125,10 @@ def score_lead(lead, keyword_index, keyword_weights):
         "logistics", "supply chain", "cold chain", "distribution",
         "warehouse", "hospital", "medical"
     ]
-    category_boost = 0.10 if any(t in category for t in boost_terms) else 0.0
+    category_boost = 0.05 if any(t in category for t in boost_terms) else 0.0
 
     # ── Weighted final score ───────────────────────────────────────────
-    final = (exact_score * 0.50) + (semantic_score * 0.40) + category_boost
+    final = (exact_score * 0.70) + (semantic_score * 0.25) + category_boost
     final = round(min(final, 1.0), 3)
 
     match_cat = _classify(hits, title, category)
