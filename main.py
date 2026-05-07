@@ -40,15 +40,6 @@ def cosine_similarity(a, b):
 
 
 def build_keyword_index(keyword_weights):
-    """
-    Build a semantic index from a weighted keyword dict.
-
-    Args:
-        keyword_weights: dict of {keyword (str): weight (float)}
-
-    Returns:
-        dict of {keyword: {"vec": np.array, "weight": float}}
-    """
     index = {}
     for kw, weight in keyword_weights.items():
         index[kw] = {
@@ -59,31 +50,6 @@ def build_keyword_index(keyword_weights):
 
 
 def score_lead(lead, keyword_index, keyword_weights):
-    """
-    Multi-signal relevance scorer with weighted keywords.
-
-    Signal 1 — Weighted exact/partial keyword match (weight 0.50)
-        Sums the row-weights of every keyword that appears as a substring
-        in the lead text. Normalised against the maximum possible weighted
-        sum so that hitting a high-weight group (e.g. PHI names at 0.7)
-        contributes far more than hitting low-weight terms.
-
-        Example: hitting "TTSH" (group weight 0.7) scores much higher than
-        hitting "cold chain" (group weight 0.1).
-
-    Signal 2 — Top-3 weighted semantic similarity average (weight 0.40)
-        Computes cosine similarity for all keywords, multiplies each by its
-        group weight, then averages the top-3 weighted scores. This means
-        semantic closeness to a high-weight PHI name matters more than
-        closeness to a generic logistics term.
-
-    Signal 3 — Category field boost (weight 0.10)
-        Small additive boost when the Ariba category label contains a
-        high-value term.
-
-    Final score = weighted sum capped at 1.0.
-    Recommended threshold: 0.5
-    """
     title    = lead.get("Lead Title", "").lower()
     category = lead.get("Category", "").lower()
     text     = f"{title} {category}"
@@ -91,7 +57,6 @@ def score_lead(lead, keyword_index, keyword_weights):
     if not text.strip():
         return 0.0, [], "none"
 
-    # ── Signal 1: Weighted exact keyword hit sum ───────────────────────
     hits = []
     weighted_hit_sum = 0.0
     max_possible_weight = sum(keyword_weights.values()) if keyword_weights else 1.0
@@ -101,10 +66,8 @@ def score_lead(lead, keyword_index, keyword_weights):
             hits.append(kw)
             weighted_hit_sum += weight
 
-    # Normalise against max possible weight sum
     exact_score = min(weighted_hit_sum / max(max_possible_weight * 0.15, 0.01), 1.0)
 
-    # ── Signal 2: Top-3 weighted semantic similarity average ───────────
     if keyword_index:
         text_vec = embed(text)
         weighted_sims = sorted(
@@ -115,14 +78,12 @@ def score_lead(lead, keyword_index, keyword_weights):
             reverse=True
         )
         top_n = weighted_sims[:3]
-        # Normalise: max possible per entry is 1.0 * max_weight
         max_weight = max(keyword_weights.values()) if keyword_weights else 1.0
         semantic_score = (sum(top_n) / len(top_n)) / max_weight if top_n else 0.0
         semantic_score = min(semantic_score, 1.0)
     else:
         semantic_score = 0.0
 
-    # ── Signal 3: Category field boost ────────────────────────────────
     boost_terms = [
         "pharma", "drug", "medicine", "vaccine", "clinical",
         "logistics", "supply chain", "cold chain", "distribution",
@@ -130,7 +91,6 @@ def score_lead(lead, keyword_index, keyword_weights):
     ]
     category_boost = 0.10 if any(t in category for t in boost_terms) else 0.0
 
-    # ── Weighted final score ───────────────────────────────────────────
     final = (exact_score * 0.50) + (semantic_score * 0.40) + category_boost
     final = round(min(final, 1.0), 3)
 
@@ -182,11 +142,17 @@ ALLOWED_LOCATIONS = ["singapore", "sg"]
 
 SMTP_HOST      = "smtp.gmail.com"
 SMTP_PORT      = 587
-SMTP_USER      = "shermanang5@gmail.com"       
-SMTP_PASSWORD  = "xoju npki hvvw wyql"   
+SMTP_USER      = "shermanang5@gmail.com"
+SMTP_PASSWORD  = "xoju npki hvvw wyql"
 EMAIL_LIST_SHEET   = "Email List"
 ALERTED_IDS_SHEET  = "Alerted IDs"
 EMAIL_ALERT_THRESHOLD = 0.65
+
+# ── Weekly email gate ──────────────────────────────────────────────────
+# Set to the weekday you want emails sent.
+# 0=Monday, 1=Tuesday, 2=Wednesday, 3=Thursday, 4=Friday, 5=Saturday, 6=Sunday
+EMAIL_SEND_WEEKDAY = 0   # Monday
+
 
 # ---------------- ALPS SCRAPER ---------------- #
 
@@ -254,6 +220,7 @@ def get_ws(ss, name):
 
 
 def write(ws, data):
+    """Full rewrite — used for ALPS sheets only."""
     ws.clear()
     if not data:
         return
@@ -261,10 +228,64 @@ def write(ws, data):
     ws.update([headers] + [[r.get(h, "") for h in headers] for r in data])
 
 
+def append_new_leads(ws, new_leads):
+    """
+    Append-only writer for the Tender Alerts sheet.
+
+    - On first run (empty sheet) writes headers + rows.
+    - On subsequent runs only appends rows whose RFI ID is not already present.
+    - Returns the count of rows actually written.
+    """
+    if not new_leads:
+        return 0
+
+    existing_values = ws.get_all_values()
+
+    if not existing_values or not existing_values[0]:
+        # Sheet is empty — write headers then all rows
+        headers = list(new_leads[0].keys())
+        ws.update([headers] + [[r.get(h, "") for h in headers] for r in new_leads])
+        print(f"  ✅ Sheet was empty — wrote {len(new_leads)} rows with headers")
+        return len(new_leads)
+
+    # Sheet already has data — find the RFI ID column index
+    headers = existing_values[0]
+    try:
+        rfi_col_idx = headers.index("RFI ID")
+    except ValueError:
+        # No RFI ID column found — fall back to appending everything
+        print("  ⚠️  'RFI ID' column not found in sheet — appending all rows")
+        rows_to_write = [[r.get(h, "") for h in headers] for r in new_leads]
+        ws.append_rows(rows_to_write)
+        return len(rows_to_write)
+
+    # Collect all existing RFI IDs (skip the header row)
+    existing_rfi_ids = {
+        row[rfi_col_idx].strip()
+        for row in existing_values[1:]
+        if len(row) > rfi_col_idx and row[rfi_col_idx].strip()
+    }
+    print(f"  📋 Existing RFI IDs in sheet: {len(existing_rfi_ids)}")
+
+    # Only keep leads whose RFI ID is not already in the sheet
+    to_append = [
+        lead for lead in new_leads
+        if str(lead.get("RFI ID", "")).strip() not in existing_rfi_ids
+    ]
+
+    if not to_append:
+        print("  📋 No new leads to append — sheet already up to date")
+        return 0
+
+    rows_to_write = [[r.get(h, "") for h in headers] for r in to_append]
+    ws.append_rows(rows_to_write)
+    print(f"  ✅ Appended {len(to_append)} new leads ({len(new_leads) - len(to_append)} duplicates skipped)")
+    return len(to_append)
+
+
 # ---------------- KEYWORDS (WEIGHTED) ---------------- #
 
 def _parse_date(date_str):
-    """Parse a date string like '17 Apr 2026' into a date object. Returns None if blank/invalid."""
     if not date_str or not date_str.strip():
         return None
     for fmt in ("%d %b %Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
@@ -276,46 +297,19 @@ def _parse_date(date_str):
 
 
 def _is_active(row):
-    """
-    Return True if this keyword row should be used today.
-    - Commission Date must be today or in the past (or blank → always active)
-    - Decommission Date must be in the future (or blank → never expires)
-    """
     today = datetime.today().date()
-
     commission_str   = row.get("Commission Date", "").strip()
     decommission_str = row.get("Decommission Date", "").strip()
-
     commission_date   = _parse_date(commission_str)
     decommission_date = _parse_date(decommission_str)
-
     if commission_date and commission_date > today:
-        return False  # not yet active
-
+        return False
     if decommission_date and decommission_date <= today:
-        return False  # expired
-
+        return False
     return True
 
 
 def get_keywords(ss):
-    """
-    Load keywords from the KEYWORDS sheet and return a weighted dict.
-
-    Expected columns: S/N | Keywords | Commission Date | Decommission Date | Weighted % | Remarks
-
-    Returns:
-        dict of {keyword (str): weight (float)}
-
-    Behaviour:
-    - Rows whose Commission Date is in the future are skipped.
-    - Rows whose Decommission Date is today or past are skipped.
-    - The 'Weighted %' column is parsed as a float (e.g. "0.7" → 0.7).
-      If missing or unparseable, defaults to 1.0 so existing rows still work.
-    - Each row's keyword string is split on whitespace, commas, or semicolons.
-      Every individual token inherits the row's weight.
-    - Duplicate tokens keep the HIGHEST weight seen across rows.
-    """
     try:
         ws  = ss.worksheet("KEYWORDS")
         rows = ws.get_all_records()
@@ -325,31 +319,26 @@ def get_keywords(ss):
         skipped_no_kw    = 0
 
         for row in rows:
-            # ── Date-based activation check ───────────────────────────
             if not _is_active(row):
                 skipped_inactive += 1
                 continue
 
-            # ── Parse weight ──────────────────────────────────────────
             raw_weight = str(row.get("Weighted %", "") or "").strip()
             try:
                 weight = float(raw_weight)
             except ValueError:
-                weight = 1.0  # default if column is missing or non-numeric
+                weight = 1.0
 
-            # ── Parse keywords ────────────────────────────────────────
             raw_kw = (row.get("Keywords") or "").strip()
             if not raw_kw:
                 skipped_no_kw += 1
                 continue
 
-            # Split on whitespace, comma, or semicolon
             tokens = re.split(r'[,;\s]+', raw_kw)
             for token in tokens:
                 token = token.strip().lower()
                 if not token:
                     continue
-                # Keep highest weight if token appears in multiple rows
                 if token in keyword_weights:
                     keyword_weights[token] = max(keyword_weights[token], weight)
                 else:
@@ -361,7 +350,6 @@ def get_keywords(ss):
             f"{skipped_no_kw} rows skipped — no keywords)"
         )
 
-        # Debug: show a sample of keywords with their weights
         sample = list(keyword_weights.items())[:12]
         for kw, w in sample:
             print(f"   {w:.2f}  {kw}")
@@ -583,7 +571,6 @@ def debug_buttons(driver):
 # ---------------- CLICK NEXT ---------------- #
 
 def click_next(driver):
-    # ── Strategy 1: scan all registered UI5 controls for Next button ──
     result = driver.execute_script("""
         try {
             var core = sap.ui.getCore();
@@ -616,7 +603,6 @@ def click_next(driver):
         print(f"  ➡️  [S1] UI5 firePress — {result}")
         return True
 
-    # ── Strategy 2: firePress by scanning Ariba button ID range ──
     result = driver.execute_script("""
         try {
             var core = sap.ui.getCore();
@@ -645,7 +631,6 @@ def click_next(driver):
         print(f"  ➡️  [S2] UI5 firePress by ID — {result}")
         return True
 
-    # ── Strategy 3: last button inside the pagination wrapper ──
     result = driver.execute_script("""
         try {
             var wrapper = document.querySelector(
@@ -681,7 +666,6 @@ def click_next(driver):
         print(f"  ➡️  [S3] DOM last-button-in-wrapper — {result}")
         return True
 
-    # ── Strategy 4: dispatchEvent directly on the button element ──
     result = driver.execute_script("""
         try {
             var btns = document.querySelectorAll(
@@ -705,7 +689,6 @@ def click_next(driver):
         print(f"  ➡️  [S4] dispatchEvent — {result}")
         return True
 
-    # ── Strategy 5: ActionChains after scrollIntoView ──
     try:
         btn = None
         for sel in ["button[aria-label*='Next Page']", "button[aria-label*='Next']"]:
@@ -1010,19 +993,6 @@ def run_ariba(keyword_string):
 # ---------------- AI FILTER ---------------- #
 
 def ai_filter(leads, index, keyword_weights, threshold=0.5):
-    """
-    Multi-signal relevance filter using weighted keywords.
-
-    threshold=0.5 is appropriate for the weighted scorer:
-      - Hitting a single high-weight PHI name (0.7 group) alone scores ~0.35
-        (Signal 1 exact hit * 0.50 weight + semantic contribution)
-      - A lead must combine keyword hits + semantic similarity to clear 0.5
-      - This prevents false positives from single-word PHI matches on
-        unrelated tenders while still surfacing genuinely relevant leads
-
-    Prints per-lead scores for auditing. The sheet includes:
-      Match_Score, Matched_Keywords, Keyword_Hit_Count, Match_Category
-    """
     out = []
     for lead in leads:
         if not index:
@@ -1053,11 +1023,6 @@ def ai_filter(leads, index, keyword_weights, threshold=0.5):
 # ---------------- ALERTED IDS ---------------- #
 
 def get_alerted_ids(ss):
-    """
-    Load all previously alerted RFI IDs from the 'Alerted IDs' sheet.
-    Returns a set of RFI ID strings.
-    Creates the sheet with headers if it doesn't exist yet.
-    """
     try:
         ws = get_ws(ss, ALERTED_IDS_SHEET)
         records = ws.get_all_records()
@@ -1070,16 +1035,11 @@ def get_alerted_ids(ss):
 
 
 def save_alerted_ids(ss, new_leads):
-    """
-    Append newly alerted RFI IDs to the 'Alerted IDs' sheet.
-    Each row records: RFI ID, Lead Title, Match Score, Date Alerted.
-    """
     if not new_leads:
         return
     try:
         ws = get_ws(ss, ALERTED_IDS_SHEET)
 
-        # Write headers if sheet is empty
         existing = ws.get_all_values()
         if not existing or not existing[0]:
             ws.append_row(["RFI ID", "Lead Title", "Match Score", "Date Alerted"])
@@ -1103,11 +1063,6 @@ def save_alerted_ids(ss, new_leads):
 # ---------------- EMAIL LIST ---------------- #
 
 def get_email_recipients(ss):
-    """
-    Load recipients from the 'Email List' sheet.
-    Expected columns: S/N | Email | Name
-    Returns a list of dicts: [{"email": ..., "name": ...}, ...]
-    """
     try:
         ws      = ss.worksheet(EMAIL_LIST_SHEET)
         records = ws.get_all_records()
@@ -1124,13 +1079,30 @@ def get_email_recipients(ss):
         return []
 
 
+# ---------------- WEEKLY EMAIL GATE ---------------- #
+
+def is_email_send_day():
+    """
+    Returns True only on the configured EMAIL_SEND_WEEKDAY.
+    Change EMAIL_SEND_WEEKDAY at the top of the file to pick your day.
+    0=Monday … 6=Sunday
+    """
+    today_weekday = datetime.today().weekday()
+    day_names = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+    scheduled = day_names[EMAIL_SEND_WEEKDAY]
+    today_name = day_names[today_weekday]
+
+    if today_weekday == EMAIL_SEND_WEEKDAY:
+        print(f"📅 Today is {today_name} — emails WILL be sent")
+        return True
+    else:
+        print(f"📅 Today is {today_name} (email day is {scheduled}) — skipping email")
+        return False
+
+
 # ---------------- EMAIL SENDER ---------------- #
 
 def _build_email_html(recipient_name, leads, run_date):
-    """
-    Build a clean HTML email body listing all new high-scoring leads.
-    One email per recipient so we can personalise the greeting.
-    """
     rows_html = ""
     for lead in leads:
         score_pct  = f"{lead.get('Match_Score', 0) * 100:.0f}%"
@@ -1181,7 +1153,7 @@ def _build_email_html(recipient_name, leads, run_date):
             <p style="margin:0 0 6px;">Hi <strong>{recipient_name}</strong>,</p>
             <p style="margin:0;">
                 The following <strong>{len(leads)} new tender lead{"s" if len(leads) != 1 else ""}</strong>
-                scored above {int(EMAIL_ALERT_THRESHOLD * 100)}% relevance in today's Ariba scan.
+                scored above {int(EMAIL_ALERT_THRESHOLD * 100)}% relevance in this week's Ariba scan.
             </p>
         </div>
 
@@ -1210,11 +1182,6 @@ def _build_email_html(recipient_name, leads, run_date):
 
 
 def send_alert_emails(recipients, new_leads, run_date):
-    """
-    Send one personalised HTML email per recipient listing all new leads.
-    Uses Office365 SMTP with TLS (port 587).
-    Skips sending if no recipients or no leads.
-    """
     if not recipients:
         print("⚠️  No recipients found — skipping email")
         return
@@ -1274,7 +1241,7 @@ def send_alert_emails(recipients, new_leads, run_date):
 def main():
     ss = connect()
 
-    # Scrape ALPS procurement pages
+    # Scrape ALPS procurement pages (always full rewrite — these are reference tables)
     for url, name in URL_SHEET_MAP.items():
         html = fetch(url)
         data = extract_events(html, url)
@@ -1287,8 +1254,6 @@ def main():
         print("❌ No keywords — check KEYWORDS sheet has 'Keywords' and 'Weighted %' columns")
         return
 
-    # Join ALL keyword tokens into one string for Ariba search box.
-    # Ariba OR-matches every word so using all keywords maximises recall.
     keyword_string = " ".join(keyword_weights.keys())
     print(f"\n🔑 Search string ({len(keyword_weights)} tokens): {keyword_string[:120]}...")
 
@@ -1304,7 +1269,7 @@ def main():
         print("❌ No results from Ariba")
         return
 
-    # Deduplicate by RFI ID
+    # Deduplicate by RFI ID (within this run)
     seen    = set()
     deduped = []
     for r in raw:
@@ -1320,16 +1285,17 @@ def main():
     final = ai_filter(deduped, index, keyword_weights, threshold=0.5)
     print(f"FINAL (after AI filter): {len(final)}")
 
-    # Write all filtered leads (score >= 0.5) to Google Sheet
-    write(get_ws(ss, TENDER_ALERTS_SHEET), final)
-    print(f"✅ Written to '{TENDER_ALERTS_SHEET}' sheet")
+    # ── Append-only write to Tender Alerts sheet ───────────────────────
+    # Only rows with RFI IDs not already in the sheet are added.
+    tender_ws = get_ws(ss, TENDER_ALERTS_SHEET)
+    appended  = append_new_leads(tender_ws, final)
+    print(f"✅ Appended {appended} new leads to '{TENDER_ALERTS_SHEET}' sheet")
 
-    # ── Email alert: only NEW leads above 0.7 threshold ───────────────
-    run_date     = datetime.today().strftime("%d %b %Y")
-    alerted_ids  = get_alerted_ids(ss)
-    recipients   = get_email_recipients(ss)
+    # ── Email alert: only NEW leads above threshold, only on send day ──
+    run_date    = datetime.today().strftime("%d %b %Y")
+    alerted_ids = get_alerted_ids(ss)
+    recipients  = get_email_recipients(ss)
 
-    # Filter to high-scoring leads not previously alerted
     high_score_leads = [
         lead for lead in final
         if lead.get("Match_Score", 0) >= EMAIL_ALERT_THRESHOLD
@@ -1344,12 +1310,14 @@ def main():
     print(f"   Already alerted (skipped)    : {len(high_score_leads) - len(new_leads)}")
     print(f"   New leads to email           : {len(new_leads)}")
 
-    if new_leads:
+    # ── Weekly gate: only send email on the configured weekday ────────
+    if new_leads and is_email_send_day():
         send_alert_emails(recipients, new_leads, run_date)
         save_alerted_ids(ss, new_leads)
+    elif new_leads:
+        print("📭 New leads found but not email day — skipping send (IDs NOT marked as alerted)")
     else:
         print("📭 No new leads to alert — skipping email")
-
 
 
 if __name__ == "__main__":
