@@ -151,7 +151,7 @@ EMAIL_ALERT_THRESHOLD = 0.65
 # ── Weekly email gate ──────────────────────────────────────────────────
 # Set to the weekday you want emails sent.
 # 0=Monday, 1=Tuesday, 2=Wednesday, 3=Thursday, 4=Friday, 5=Saturday, 6=Sunday
-EMAIL_SEND_WEEKDAY = 0   # Monday
+EMAIL_SEND_WEEKDAY = 4   # Monday
 
 
 # ---------------- ALPS SCRAPER ---------------- #
