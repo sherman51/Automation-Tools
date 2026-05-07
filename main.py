@@ -186,7 +186,7 @@ SMTP_USER      = "shermanang5@gmail.com"
 SMTP_PASSWORD  = "xoju npki hvvw wyql"   
 EMAIL_LIST_SHEET   = "Email List"
 ALERTED_IDS_SHEET  = "Alerted IDs"
-EMAIL_ALERT_THRESHOLD = 0.7
+EMAIL_ALERT_THRESHOLD = 0.65
 
 # ---------------- ALPS SCRAPER ---------------- #
 
