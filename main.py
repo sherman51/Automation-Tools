@@ -218,14 +218,64 @@ def get_ws(ss, name):
     except:
         return ss.add_worksheet(title=name, rows="1000", cols="20")
 
-
 def write(ws, data):
-    """Full rewrite — used for ALPS sheets only."""
+    """Full rewrite — legacy, kept for reference."""
     ws.clear()
     if not data:
         return
     headers = list(data[0].keys())
     ws.update([headers] + [[r.get(h, "") for h in headers] for r in data])
+
+
+def append_new_alps_events(ws, new_data):
+    """
+    Append-only writer for ALPS sourcing sheets (archive mode).
+
+    Uses a composite key of all column values joined together to detect
+    duplicate rows — so truly identical entries are never double-written,
+    but any changed/new event will be recorded.
+
+    Returns the count of rows actually appended.
+    """
+    if not new_data:
+        return 0
+
+    existing_values = ws.get_all_values()
+
+    if not existing_values or not existing_values[0]:
+        # Sheet is empty — write headers then all rows
+        headers = list(new_data[0].keys())
+        ws.update([headers] + [[r.get(h, "") for h in headers] for r in new_data])
+        print(f"  ✅ Sheet was empty — wrote {len(new_data)} rows with headers")
+        return len(new_data)
+
+    headers = existing_values[0]
+
+    # Build composite keys from all cell values to detect true duplicates
+    def make_key(row_values):
+        return "||".join(str(v).strip().lower() for v in row_values)
+
+    existing_keys = {
+        make_key(row)
+        for row in existing_values[1:]
+        if any(cell.strip() for cell in row)  # skip fully blank rows
+    }
+    print(f"  📋 Existing rows in sheet: {len(existing_keys)}")
+
+    to_append = []
+    for record in new_data:
+        row_values = [str(record.get(h, "")).strip() for h in headers]
+        key = make_key(row_values)
+        if key not in existing_keys:
+            to_append.append(row_values)
+
+    if not to_append:
+        print("  📋 No new events to append — sheet already up to date")
+        return 0
+
+    ws.append_rows(to_append)
+    print(f"  ✅ Appended {len(to_append)} new events ({len(new_data) - len(to_append)} duplicates skipped)")
+    return len(to_append)
 
 
 def append_new_leads(ws, new_leads):
@@ -1245,8 +1295,8 @@ def main():
     for url, name in URL_SHEET_MAP.items():
         html = fetch(url)
         data = extract_events(html, url)
-        write(get_ws(ss, name), data)
-        print(f"✅ Written {len(data)} rows → '{name}'")
+        appended = append_new_alps_events(get_ws(ss, name), data)
+        print(f"✅ Appended {appended} new rows → '{name}'")
 
     # Load weighted keywords from Google Sheet
     keyword_weights = get_keywords(ss)
