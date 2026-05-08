@@ -1360,12 +1360,9 @@ def main():
     print(f"   Already alerted (skipped)    : {len(high_score_leads) - len(new_leads)}")
     print(f"   New leads to email           : {len(new_leads)}")
 
-    # ── Weekly gate: only send email on the configured weekday ────────
-    if new_leads and is_email_send_day():
+    if new_leads:
         send_alert_emails(recipients, new_leads, run_date)
         save_alerted_ids(ss, new_leads)
-    elif new_leads:
-        print("📭 New leads found but not email day — skipping send (IDs NOT marked as alerted)")
     else:
         print("📭 No new leads to alert — skipping email")
 
