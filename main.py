@@ -142,8 +142,8 @@ ALLOWED_LOCATIONS = ["singapore", "sg"]
 
 SMTP_HOST      = "smtp.gmail.com"
 SMTP_PORT      = 587
-SMTP_USER      = "shermanang5@gmail.com"
-SMTP_PASSWORD  = "xoju npki hvvw wyql"
+SMTP_USER      = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD  = os.getenv("SMTP_PASSWORD", "")
 EMAIL_LIST_SHEET   = "Email List"
 ALERTED_IDS_SHEET  = "Alerted IDs"
 EMAIL_ALERT_THRESHOLD = 0.65
