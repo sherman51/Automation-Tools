@@ -146,7 +146,7 @@ SMTP_USER      = "shermanang5@gmail.com"
 SMTP_PASSWORD  = "xoju npki hvvw wyql"
 EMAIL_LIST_SHEET   = "Email List"
 ALERTED_IDS_SHEET  = "Alerted IDs"
-EMAIL_ALERT_THRESHOLD = 0.65
+EMAIL_ALERT_THRESHOLD = 0.60
 
 # ── Weekly email gate ──────────────────────────────────────────────────
 # Set to the weekday you want emails sent.
