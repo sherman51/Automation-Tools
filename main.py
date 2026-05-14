@@ -146,7 +146,7 @@ SMTP_USER      = "rpabot16@gmail.com"
 SMTP_PASSWORD  = "ojou ayhv kckz cpmw"
 EMAIL_LIST_SHEET   = "Email List"
 ALERTED_IDS_SHEET  = "Alerted IDs"
-EMAIL_ALERT_THRESHOLD = 0.65
+EMAIL_ALERT_THRESHOLD = 0.6
 
 # ── Weekly email gate ──────────────────────────────────────────────────
 # Set to the weekday you want emails sent.
